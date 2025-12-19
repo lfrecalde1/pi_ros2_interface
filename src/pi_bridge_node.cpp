@@ -33,7 +33,7 @@ public:
   {
     declare_parameter<std::string>("serial_device", "/dev/ttyTHS1");
     declare_parameter<int>("baud", 921600);
-    declare_parameter<double>("tx_rate_hz", 300.0);
+    declare_parameter<double>("tx_rate_hz", 500.0);
 
     // independent publish rates
     declare_parameter<double>("rx_rate_hz", 1000.0);
