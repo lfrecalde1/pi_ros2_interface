@@ -853,7 +853,7 @@ __attribute__((unused)) static inline void piPrintMsgEagleStates(int (* printer)
 #define PI_MSG_EAGLE_OFFBOARD_ATTITUDE_MODE PI_RXTX
 
 #define PI_MSG_EAGLE_OFFBOARD_ATTITUDE_ID 14
-#define PI_MSG_EAGLE_OFFBOARD_ATTITUDE_PAYLOAD_LEN 25
+#define PI_MSG_EAGLE_OFFBOARD_ATTITUDE_PAYLOAD_LEN 37
 
 // msg definition
 typedef struct __pi_EAGLE_OFFBOARD_ATTITUDE_t
@@ -868,6 +868,9 @@ typedef struct __pi_EAGLE_OFFBOARD_ATTITUDE_t
     float qx_d;
     float qy_d;
     float qz_d;
+    float wx_d;
+    float wy_d;
+    float wz_d;
 } __attribute__((packed)) pi_EAGLE_OFFBOARD_ATTITUDE_t;
 
 // todo: we can save on memory, if we use a union as the tx-buffer and not
@@ -894,6 +897,9 @@ __attribute__((unused)) static inline void piPrintMsgEagleOffboardAttitude(int (
         printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "qx_d", ":", (double)piMsgEagleOffboardAttitudeRx->qx_d);
         printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "qy_d", ":", (double)piMsgEagleOffboardAttitudeRx->qy_d);
         printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "qz_d", ":", (double)piMsgEagleOffboardAttitudeRx->qz_d);
+        printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "wx_d", ":", (double)piMsgEagleOffboardAttitudeRx->wx_d);
+        printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "wy_d", ":", (double)piMsgEagleOffboardAttitudeRx->wy_d);
+        printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "wz_d", ":", (double)piMsgEagleOffboardAttitudeRx->wz_d);
     } else {
         printer("    piMsgEagleOffboardAttitudeRx is NULL. Message likely not received yet.\n");
     }
@@ -909,7 +915,7 @@ __attribute__((unused)) static inline void piPrintMsgEagleOffboardAttitude(int (
 #define PI_MSG_EAGLE_RC_ATTITUDE_MODE PI_RXTX
 
 #define PI_MSG_EAGLE_RC_ATTITUDE_ID 15
-#define PI_MSG_EAGLE_RC_ATTITUDE_PAYLOAD_LEN 24
+#define PI_MSG_EAGLE_RC_ATTITUDE_PAYLOAD_LEN 36
 
 // msg definition
 typedef struct __pi_EAGLE_RC_ATTITUDE_t
@@ -923,6 +929,9 @@ typedef struct __pi_EAGLE_RC_ATTITUDE_t
     float qx_d;
     float qy_d;
     float qz_d;
+    float wx_d;
+    float wy_d;
+    float wz_d;
 } __attribute__((packed)) pi_EAGLE_RC_ATTITUDE_t;
 
 // todo: we can save on memory, if we use a union as the tx-buffer and not
@@ -948,6 +957,9 @@ __attribute__((unused)) static inline void piPrintMsgEagleRcAttitude(int (* prin
         printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "qx_d", ":", (double)piMsgEagleRcAttitudeRx->qx_d);
         printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "qy_d", ":", (double)piMsgEagleRcAttitudeRx->qy_d);
         printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "qz_d", ":", (double)piMsgEagleRcAttitudeRx->qz_d);
+        printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "wx_d", ":", (double)piMsgEagleRcAttitudeRx->wx_d);
+        printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "wy_d", ":", (double)piMsgEagleRcAttitudeRx->wy_d);
+        printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "wz_d", ":", (double)piMsgEagleRcAttitudeRx->wz_d);
     } else {
         printer("    piMsgEagleRcAttitudeRx is NULL. Message likely not received yet.\n");
     }

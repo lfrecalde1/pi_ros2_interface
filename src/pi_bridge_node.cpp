@@ -64,12 +64,6 @@ public:
     // publish desired attitude for RViz2
     att_sp_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("att_sp", 10);
 
-    // command subscription (ROS-frame command)
-    //cmd_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
-    //  "/pi/eagle_offboard_attitude_cmd", 10,
-    //  std::bind(&PiBridgeNode::cmd_callback, this, std::placeholders::_1)
-    //);
-
     so3_command_sub_ = create_subscription<quadrotor_msgs::msg::SO3Command>(
       "eagle4/so3_cmd_2", 10,
       std::bind(&PiBridgeNode::so3_cmd_callback, this, std::placeholders::_1)
@@ -87,6 +81,9 @@ public:
     cmd_active_ = 0.0f;
     cmd_throttle_ = 0.001f;
     cmd_qw_=1.0f; cmd_qx_=0.0f; cmd_qy_=0.0f; cmd_qz_=0.0f;
+    cmd_wx_ = 0.0f;
+    cmd_wy_ = 0.0f;
+    cmd_wz_ = 0.0f;
 
     // default last good state
     {
@@ -196,17 +193,6 @@ private:
     }
   }
 
-  //void cmd_callback(const std_msgs::msg::Float32MultiArray::SharedPtr msg) {
-  //  // Expect: [active_offboard, throttle_d, qw, qx, qy, qz] in ROS frames
-  //  if (msg->data.size() < 6) return;
-  //  cmd_active_   = msg->data[0];
-  //  cmd_throttle_ = msg->data[1];
-  //  cmd_qw_ = msg->data[2];
-  //  cmd_qx_ = msg->data[3];
-  //  cmd_qy_ = msg->data[4];
-  //  cmd_qz_ = msg->data[5];
-  //}
-
   void so3_cmd_callback(const quadrotor_msgs::msg::SO3Command::SharedPtr msg) {
 
     const Eigen::Vector3d fDes(msg->force.x, msg->force.y, msg->force.z);
@@ -239,15 +225,17 @@ private:
         fDes(0) * rCur(0, 2) + fDes(1) * rCur(1, 2) + fDes(2) * rCur(2, 2);
 
     cmd_throttle_ = throttle;
-    //cmd_qw_ = qDesTransformed.w();
-    //cmd_qx_ = qDesTransformed.x();
-    //cmd_qy_ = qDesTransformed.y();
-    //cmd_qz_ = qDesTransformed.z();
 
     cmd_qw_ = qDes.w();
     cmd_qx_ = qDes.x();
     cmd_qy_ = qDes.y();
     cmd_qz_ = qDes.z();
+
+    // update desired angular velocity
+    cmd_wx_ = msg->angular_velocity.x;
+    cmd_wy_ = msg->angular_velocity.y;
+    cmd_wz_ = msg->angular_velocity.z;
+    
 
       return;
   }
@@ -363,13 +351,16 @@ tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
 #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_RC_ATTITUDE_MODE & PI_RX)
         if (piMsgEagleRcAttitudeRx) {
           std_msgs::msg::Float32MultiArray out;
-          out.data.resize(6);
+          out.data.resize(9);
           out.data[0] = (float)piMsgEagleRcAttitudeRx->time_us;
           out.data[1] = piMsgEagleRcAttitudeRx->throttle_d;
           out.data[2] = piMsgEagleRcAttitudeRx->qw_d;
           out.data[3] = piMsgEagleRcAttitudeRx->qx_d;
           out.data[4] = piMsgEagleRcAttitudeRx->qy_d;
           out.data[5] = piMsgEagleRcAttitudeRx->qz_d;
+          out.data[6] = piMsgEagleRcAttitudeRx->wx_d;
+          out.data[7] = piMsgEagleRcAttitudeRx->wy_d;
+          out.data[8] = piMsgEagleRcAttitudeRx->wz_d;
           rc_pub_->publish(out);
 
           // store desired attitude (Betaflight -> ROS) for RViz2
@@ -472,16 +463,29 @@ tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
 
       q_cmd_bf.normalize();
 
+      Eigen::Vector3d w_cmd_ros(cmd_wx_,
+                                cmd_wy_,
+                                cmd_wz_);
+      Eigen::Vector3d w_cmd_bf = w_cmd_ros * FRD_FLU_Q.toRotationMatrix().transpose();
+
       piMsgEagleOffboardAttitudeTx.qw_d = (float)q_cmd_bf.w();
       piMsgEagleOffboardAttitudeTx.qx_d = (float)q_cmd_bf.x();
       piMsgEagleOffboardAttitudeTx.qy_d = (float)q_cmd_bf.y();
       piMsgEagleOffboardAttitudeTx.qz_d = (float)q_cmd_bf.z();
+
+      piMsgEagleOffboardAttitudeTx.wx_d = w_cmd_bf.x();
+      piMsgEagleOffboardAttitudeTx.wy_d = w_cmd_bf.y();
+      piMsgEagleOffboardAttitudeTx.wz_d = w_cmd_bf.z();
     } else {
       // safe fallback
       piMsgEagleOffboardAttitudeTx.qw_d = 1.0f;
       piMsgEagleOffboardAttitudeTx.qx_d = 0.0f;
       piMsgEagleOffboardAttitudeTx.qy_d = 0.0f;
       piMsgEagleOffboardAttitudeTx.qz_d = 0.0f;
+
+      piMsgEagleOffboardAttitudeTx.wx_d = 1.0f;
+      piMsgEagleOffboardAttitudeTx.wy_d = 0.0f;
+      piMsgEagleOffboardAttitudeTx.wz_d = 0.0f;
     }
 
     piSendMsg((void*)&piMsgEagleOffboardAttitudeTx, serial_writer);
@@ -512,6 +516,7 @@ private:
   float cmd_active_{1.0f};
   float cmd_throttle_{1.0f};
   float cmd_qw_{1.0f}, cmd_qx_{0.0f}, cmd_qy_{0.0f}, cmd_qz_{0.0f};
+  float cmd_wx_{0.0f}, cmd_wy_{0.0f}, cmd_wz_{0.0f};
 
   static PiBridgeNode* instance_;
     
