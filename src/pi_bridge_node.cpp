@@ -1,7 +1,10 @@
 #include <rclcpp/rclcpp.hpp>
+
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/vector3_stamped.hpp>   // NEW: body-rate publisher
+
 #include <quadrotor_msgs/msg/so3_command.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
@@ -42,7 +45,7 @@ public:
     declare_parameter<double>("rx_rate_hz", 1000.0);
     declare_parameter<double>("odom_rate_hz", 500.0);
 
-    // independent publish rate for desired attitude
+    // independent publish rate for desired attitude + desired body-rate
     declare_parameter<double>("att_sp_rate_hz", 100.0);
 
     serial_device_ = get_parameter("serial_device").as_string();
@@ -64,6 +67,9 @@ public:
     // publish desired attitude for RViz2
     att_sp_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("att_sp", 10);
 
+    // NEW: publish desired body-rate (angular velocity) in ROS body frame (FLU)
+    att_sp_w_pub_ = create_publisher<geometry_msgs::msg::Vector3Stamped>("att_sp_bodyrate", 10);
+
     so3_command_sub_ = create_subscription<quadrotor_msgs::msg::SO3Command>(
       "eagle4/so3_cmd_2", 10,
       std::bind(&PiBridgeNode::so3_cmd_callback, this, std::placeholders::_1)
@@ -74,13 +80,14 @@ public:
       std::bind(&PiBridgeNode::odom_callback, this, std::placeholders::_1)
     );
 
-
     memset(&parser_, 0, sizeof(parser_));
 
     // default command (ROS frame)
     cmd_active_ = 0.0f;
     cmd_throttle_ = 0.001f;
     cmd_qw_=1.0f; cmd_qx_=0.0f; cmd_qy_=0.0f; cmd_qz_=0.0f;
+
+    // NEW: desired body-rate command (ROS frame, FLU)
     cmd_wx_ = 0.0f;
     cmd_wy_ = 0.0f;
     cmd_wz_ = 0.0f;
@@ -94,11 +101,12 @@ public:
       last_state_stamp_ = this->now();
     }
 
-    // default desired attitude storage
+    // desired attitude + desired body-rate storage (ROS frame)
     {
       std::lock_guard<std::mutex> lk(sp_mtx_);
       have_valid_sp_ = false;
       last_q_sp_ros_ = Eigen::Quaterniond(1,0,0,0);
+      last_w_sp_ros_ = Eigen::Vector3d::Zero();   // NEW
       last_sp_stamp_ = this->now();
     }
 
@@ -128,6 +136,12 @@ public:
     att_sp_timer_ = create_wall_timer(
       std::chrono::microseconds(sp_period_us),
       std::bind(&PiBridgeNode::att_sp_spin, this)
+    );
+
+    // NEW: Desired body-rate timer (same rate as att_sp, kept minimal)
+    att_sp_w_timer_ = create_wall_timer(
+      std::chrono::microseconds(sp_period_us),
+      std::bind(&PiBridgeNode::att_sp_w_spin, this)
     );
 
     RCLCPP_INFO(get_logger(),
@@ -194,18 +208,24 @@ private:
   }
 
   void so3_cmd_callback(const quadrotor_msgs::msg::SO3Command::SharedPtr msg) {
-
     const Eigen::Vector3d fDes(msg->force.x, msg->force.y, msg->force.z);
-    const Eigen::Quaterniond qDes(msg->orientation.w, msg->orientation.x,
-                                msg->orientation.y, msg->orientation.z);
 
-    // get corrected yaw from odom
+    // SO3Command orientation is in ROS convention already
+    const Eigen::Quaterniond qDes(msg->orientation.w,
+                                 msg->orientation.x,
+                                 msg->orientation.y,
+                                 msg->orientation.z);
+
+    // SO3Command angular_velocity is in ROS body frame already (assumed base_link FLU)
+    const Eigen::Vector3d wDes_ros(msg->angular_velocity.x,
+                                  msg->angular_velocity.y,
+                                  msg->angular_velocity.z);
+
+    // get corrected yaw from odom (your existing logic)
     const tf2::Quaternion tfImuOdomYaw = getTfYaw(imuQ, odomQ);
 
-
     Eigen::Quaterniond qDesTransformed =
-        Eigen::Quaterniond(tfImuOdomYaw.w(), tfImuOdomYaw.x(), tfImuOdomYaw.y(),
-                         tfImuOdomYaw.z()) * qDes;
+        Eigen::Quaterniond(tfImuOdomYaw.w(), tfImuOdomYaw.x(), tfImuOdomYaw.y(), tfImuOdomYaw.z()) * qDes;
 
     // check psi for stability
     const Eigen::Matrix3d rDes(qDes);
@@ -217,58 +237,49 @@ private:
                       rDes(0, 2) * rCur(0, 2) + rDes(1, 2) * rCur(1, 2) +
                       rDes(2, 2) * rCur(2, 2)));
 
-    if (psi > 1.0f)
-        RCLCPP_WARN(this->get_logger(),
-                "Psi(%f) > 1.0, orientation error is too large!", psi);
+    if (psi > 1.0f) {
+      RCLCPP_WARN(this->get_logger(),
+                  "Psi(%f) > 1.0, orientation error is too large!", psi);
+    }
 
     double throttle =
         fDes(0) * rCur(0, 2) + fDes(1) * rCur(1, 2) + fDes(2) * rCur(2, 2);
 
-    cmd_throttle_ = throttle;
+    // Store command (ROS frame)
+    cmd_throttle_ = (float)throttle;
+    cmd_qw_ = (float)qDesTransformed.w();
+    cmd_qx_ = (float)qDesTransformed.x();
+    cmd_qy_ = (float)qDesTransformed.y();
+    cmd_qz_ = (float)qDesTransformed.z();
 
-    cmd_qw_ = qDes.w();
-    cmd_qx_ = qDes.x();
-    cmd_qy_ = qDes.y();
-    cmd_qz_ = qDes.z();
-
-    // update desired angular velocity
-    cmd_wx_ = msg->angular_velocity.x;
-    cmd_wy_ = msg->angular_velocity.y;
-    cmd_wz_ = msg->angular_velocity.z;
-    
-
-      return;
+    // NEW: also store desired angular velocity (ROS body frame)
+    cmd_wx_ = (float)wDes_ros.x();
+    cmd_wy_ = (float)wDes_ros.y();
+    cmd_wz_ = (float)wDes_ros.z();
   }
 
   void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
-
     odomQ.w() = msg->pose.pose.orientation.w;
     odomQ.x() = msg->pose.pose.orientation.x;
     odomQ.y() = msg->pose.pose.orientation.y;
     odomQ.z() = msg->pose.pose.orientation.z;
-    return;
   }
 
+  tf2::Quaternion getTfYaw(const Eigen::Quaterniond& imu, const Eigen::Quaterniond& odom) {
+    tf2::Quaternion imuTf(imu.x(), imu.y(), imu.z(), imu.w());
+    tf2::Quaternion odomTf(odom.x(), odom.y(), odom.z(), odom.w());
 
-tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
-                                          Eigen::Quaterniond odom) {
-  // convert to tf2::quaternion
-  tf2::Quaternion imuTf = tf2::Quaternion(imu.x(), imu.y(), imu.z(), imu.w());
-  tf2::Quaternion odomTf =
-      tf2::Quaternion(odom.x(), odom.y(), odom.z(), odom.w());
+    tf2::Matrix3x3(imuTf).getRPY(imuRoll, imuPitch, imuYaw);
+    tf2::Matrix3x3(odomTf).getRPY(odomRoll, odomPitch, odomYaw);
 
-  tf2::Matrix3x3(imuTf).getRPY(imuRoll, imuPitch, imuYaw);
-  tf2::Matrix3x3(odomTf).getRPY(odomRoll, odomPitch, odomYaw);
+    tf2::Quaternion imuTfYaw;
+    tf2::Quaternion odomTfYaw;
+    imuTfYaw.setRPY(0.0, 0.0, imuYaw);
+    odomTfYaw.setRPY(0.0, 0.0, odomYaw);
 
-  // create only yaw tf2::Quat
-  tf2::Quaternion imuTfYaw;
-  tf2::Quaternion odomTfYaw;
-  imuTfYaw.setRPY(0.0, 0.0, imuYaw);
-  odomTfYaw.setRPY(0.0, 0.0, odomYaw);
-  const tf2::Quaternion yawCorrection = imuTfYaw * odomTfYaw.inverse();
-
-  return yawCorrection;
-}
+    const tf2::Quaternion yawCorrection = imuTfYaw * odomTfYaw.inverse();
+    return yawCorrection;
+  }
 
   static bool quat_is_sane(const Eigen::Quaterniond& q_in) {
     const double w = q_in.w(), x = q_in.x(), y = q_in.y(), z = q_in.z();
@@ -329,15 +340,12 @@ tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
             if (quat_is_sane(q_ros) && vec_is_finite(w_bf)) {
               q_ros.normalize();
 
-              // Body rates FRD -> FLU only (same as before)
+              // Body rates FRD -> FLU only
               Eigen::Vector3d w_ros = FRD_FLU_Q.toRotationMatrix() * w_bf;
 
               std::lock_guard<std::mutex> lk(state_mtx_);
               last_q_ros_ = q_ros;
-              imuQ.w() = last_q_ros_.w();
-              imuQ.x() = last_q_ros_.x();
-              imuQ.y() = last_q_ros_.y();
-              imuQ.z() = last_q_ros_.z();
+              imuQ = last_q_ros_;
               last_w_ros_ = w_ros;
               have_valid_state_ = true;
               last_state_stamp_ = this->now();
@@ -350,17 +358,23 @@ tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
       if (id == PI_MSG_EAGLE_RC_ATTITUDE_ID) {
 #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_RC_ATTITUDE_MODE & PI_RX)
         if (piMsgEagleRcAttitudeRx) {
+          // NOTE: you kept this topic as Float32MultiArray; leaving it as-is
           std_msgs::msg::Float32MultiArray out;
+          // If your RC_ATTITUDE now contains wx_d/wy_d/wz_d, you can expand this size accordingly.
           out.data.resize(9);
           out.data[0] = (float)piMsgEagleRcAttitudeRx->time_us;
           out.data[1] = piMsgEagleRcAttitudeRx->throttle_d;
+
+          // Attitude from betaflight
           out.data[2] = piMsgEagleRcAttitudeRx->qw_d;
           out.data[3] = piMsgEagleRcAttitudeRx->qx_d;
           out.data[4] = piMsgEagleRcAttitudeRx->qy_d;
           out.data[5] = piMsgEagleRcAttitudeRx->qz_d;
+          // Angular veloicty from betaflight
           out.data[6] = piMsgEagleRcAttitudeRx->wx_d;
           out.data[7] = piMsgEagleRcAttitudeRx->wy_d;
           out.data[8] = piMsgEagleRcAttitudeRx->wz_d;
+
           rc_pub_->publish(out);
 
           // store desired attitude (Betaflight -> ROS) for RViz2
@@ -369,13 +383,26 @@ tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
                                      piMsgEagleRcAttitudeRx->qy_d,
                                      piMsgEagleRcAttitudeRx->qz_d);
 
+          // NEW: desired body-rate comes in Betaflight body frame (FRD)
+          // If your struct fields are named differently, adjust here.
+          Eigen::Vector3d w_sp_bf(
+              (double)piMsgEagleRcAttitudeRx->wx_d,
+              (double)piMsgEagleRcAttitudeRx->wy_d,
+              (double)piMsgEagleRcAttitudeRx->wz_d);
+
           if (quat_is_sane(q_sp_bf)) {
             q_sp_bf.normalize();
             Eigen::Quaterniond q_sp_ros = Q_YAW_OFFSET * (NED_ENU_Q * q_sp_bf * FRD_FLU_Q);
-            if (quat_is_sane(q_sp_ros)) {
+
+            if (quat_is_sane(q_sp_ros) && vec_is_finite(w_sp_bf)) {
               q_sp_ros.normalize();
+
+              // NEW: body-rate FRD -> FLU for ROS publishing (no NED/ENU, no yaw)
+              Eigen::Vector3d w_sp_ros = FRD_FLU_Q.toRotationMatrix() * w_sp_bf;
+
               std::lock_guard<std::mutex> lk(sp_mtx_);
               last_q_sp_ros_ = q_sp_ros;
+              last_w_sp_ros_ = w_sp_ros;
               have_valid_sp_ = true;
               last_sp_stamp_ = this->now();
             }
@@ -434,6 +461,26 @@ tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
     att_sp_pub_->publish(pose);
   }
 
+  // NEW: publish desired body-rate in ROS frame (FLU)
+  void att_sp_w_spin() {
+    Eigen::Vector3d wsp;
+    {
+      std::lock_guard<std::mutex> lk(sp_mtx_);
+      if (!have_valid_sp_) return;
+      wsp = last_w_sp_ros_;
+    }
+
+    geometry_msgs::msg::Vector3Stamped vmsg;
+    vmsg.header.stamp = this->now();
+    vmsg.header.frame_id = "base_link";  // body rates are in body frame
+
+    vmsg.vector.x = wsp.x();
+    vmsg.vector.y = wsp.y();
+    vmsg.vector.z = wsp.z();
+
+    att_sp_w_pub_->publish(vmsg);
+  }
+
   void tx_spin() {
     instance_ = this;
 
@@ -445,14 +492,13 @@ tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
     piMsgEagleOffboardAttitudeTx.active_offboard = (uint8_t)(cmd_active_ > 0.5f);
     piMsgEagleOffboardAttitudeTx.throttle_d = cmd_throttle_;
 
-    // ----- CRITICAL FIX: ROS -> Betaflight conversion before sending -----
-    // cmd_q* is assumed ROS frame (ENU world + FLU body), because that is what you command from ROS.
+    // ROS -> Betaflight conversion before sending
     Eigen::Quaterniond q_cmd_ros(cmd_qw_, cmd_qx_, cmd_qy_, cmd_qz_);
 
     if (quat_is_sane(q_cmd_ros)) {
       q_cmd_ros.normalize();
 
-      // Inverse of your RX mapping:
+      // Inverse of RX mapping:
       // q_ros = Q_YAW_OFFSET * (NED_ENU_Q * q_bf * FRD_FLU_Q)
       // => q_bf = NED_ENU_Q^{-1} * Q_YAW_OFFSET^{-1} * q_ros * FRD_FLU_Q^{-1}
       Eigen::Quaterniond q_cmd_bf =
@@ -460,22 +506,24 @@ tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
           Q_YAW_OFFSET.inverse() *
           q_cmd_ros *
           FRD_FLU_Q.inverse();
-
       q_cmd_bf.normalize();
-
-      Eigen::Vector3d w_cmd_ros(cmd_wx_,
-                                cmd_wy_,
-                                cmd_wz_);
-      Eigen::Vector3d w_cmd_bf = w_cmd_ros * FRD_FLU_Q.toRotationMatrix().transpose();
 
       piMsgEagleOffboardAttitudeTx.qw_d = (float)q_cmd_bf.w();
       piMsgEagleOffboardAttitudeTx.qx_d = (float)q_cmd_bf.x();
       piMsgEagleOffboardAttitudeTx.qy_d = (float)q_cmd_bf.y();
       piMsgEagleOffboardAttitudeTx.qz_d = (float)q_cmd_bf.z();
 
-      piMsgEagleOffboardAttitudeTx.wx_d = w_cmd_bf.x();
-      piMsgEagleOffboardAttitudeTx.wy_d = w_cmd_bf.y();
-      piMsgEagleOffboardAttitudeTx.wz_d = w_cmd_bf.z();
+      // NEW: desired body-rate ROS(FLU) -> Betaflight(FRD)
+      // IMPORTANT: only body-frame transform. Do NOT apply NED/ENU or yaw offsets.
+      const Eigen::Vector3d w_cmd_ros((double)cmd_wx_, (double)cmd_wy_, (double)cmd_wz_);
+
+      // FIX: correct Eigen multiplication order (column vector)
+      const Eigen::Matrix3d R_frd_flu = FRD_FLU_Q.toRotationMatrix(); // maps FRD -> FLU
+      const Eigen::Vector3d w_cmd_bf  = R_frd_flu.transpose() * w_cmd_ros; // FLU -> FRD
+
+      piMsgEagleOffboardAttitudeTx.wx_d = (float)w_cmd_bf.x();
+      piMsgEagleOffboardAttitudeTx.wy_d = (float)w_cmd_bf.y();
+      piMsgEagleOffboardAttitudeTx.wz_d = (float)w_cmd_bf.z();
     } else {
       // safe fallback
       piMsgEagleOffboardAttitudeTx.qw_d = 1.0f;
@@ -483,7 +531,7 @@ tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
       piMsgEagleOffboardAttitudeTx.qy_d = 0.0f;
       piMsgEagleOffboardAttitudeTx.qz_d = 0.0f;
 
-      piMsgEagleOffboardAttitudeTx.wx_d = 1.0f;
+      piMsgEagleOffboardAttitudeTx.wx_d = 0.0f;
       piMsgEagleOffboardAttitudeTx.wy_d = 0.0f;
       piMsgEagleOffboardAttitudeTx.wz_d = 0.0f;
     }
@@ -503,7 +551,9 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr att_sp_pub_;
 
-  rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr cmd_sub_;
+  // NEW
+  rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr att_sp_w_pub_;
+
   rclcpp::Subscription<quadrotor_msgs::msg::SO3Command>::SharedPtr so3_command_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
 
@@ -511,19 +561,22 @@ private:
   rclcpp::TimerBase::SharedPtr tx_timer_;
   rclcpp::TimerBase::SharedPtr odom_timer_;
   rclcpp::TimerBase::SharedPtr att_sp_timer_;
+  rclcpp::TimerBase::SharedPtr att_sp_w_timer_;   // NEW
 
   // command (ROS frame)
   float cmd_active_{1.0f};
   float cmd_throttle_{1.0f};
   float cmd_qw_{1.0f}, cmd_qx_{0.0f}, cmd_qy_{0.0f}, cmd_qz_{0.0f};
+
+  // NEW: desired angular velocity (ROS body frame, base_link FLU)
   float cmd_wx_{0.0f}, cmd_wy_{0.0f}, cmd_wz_{0.0f};
 
   static PiBridgeNode* instance_;
-    
-  // Quternion odometry
-  Eigen::Quaterniond odomQ, imuQ;
-  double imuRoll, imuPitch, imuYaw;
-  double odomRoll, odomPitch, odomYaw;
+
+  // Quaternion odometry
+  Eigen::Quaterniond odomQ{1,0,0,0}, imuQ{1,0,0,0};
+  double imuRoll{0.0}, imuPitch{0.0}, imuYaw{0.0};
+  double odomRoll{0.0}, odomPitch{0.0}, odomYaw{0.0};
 
   // last valid state (ROS frame) for odom
   std::mutex state_mtx_;
@@ -532,10 +585,11 @@ private:
   Eigen::Vector3d last_w_ros_{0,0,0};
   rclcpp::Time last_state_stamp_{0, 0, RCL_ROS_TIME};
 
-  // desired attitude storage (ROS frame) for RViz2
+  // desired attitude + body-rate storage (ROS frame) for RViz2
   std::mutex sp_mtx_;
   bool have_valid_sp_{false};
   Eigen::Quaterniond last_q_sp_ros_{1,0,0,0};
+  Eigen::Vector3d last_w_sp_ros_{0,0,0};   // NEW
   rclcpp::Time last_sp_stamp_{0, 0, RCL_ROS_TIME};
 };
 
