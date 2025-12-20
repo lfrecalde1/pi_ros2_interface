@@ -2,6 +2,9 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <quadrotor_msgs/msg/so3_command.hpp>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
 
 #include <fcntl.h>
 #include <termios.h>
@@ -54,18 +57,29 @@ public:
       throw std::runtime_error("Failed to open serial: " + serial_device_);
     }
 
-    states_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>("/pi/eagle_states", 10);
-    rc_pub_     = create_publisher<std_msgs::msg::Float32MultiArray>("/pi/eagle_rc_attitude", 10);
-    odom_pub_   = create_publisher<nav_msgs::msg::Odometry>("/pi/eagle_odom", 10);
+    states_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>("states", 10);
+    rc_pub_     = create_publisher<std_msgs::msg::Float32MultiArray>("rc_attitude", 10);
+    odom_pub_   = create_publisher<nav_msgs::msg::Odometry>("odom_betaflight", 10);
 
     // publish desired attitude for RViz2
-    att_sp_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("/pi/eagle_att_sp", 10);
+    att_sp_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("att_sp", 10);
 
     // command subscription (ROS-frame command)
-    cmd_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
-      "/pi/eagle_offboard_attitude_cmd", 10,
-      std::bind(&PiBridgeNode::cmd_callback, this, std::placeholders::_1)
+    //cmd_sub_ = create_subscription<std_msgs::msg::Float32MultiArray>(
+    //  "/pi/eagle_offboard_attitude_cmd", 10,
+    //  std::bind(&PiBridgeNode::cmd_callback, this, std::placeholders::_1)
+    //);
+
+    so3_command_sub_ = create_subscription<quadrotor_msgs::msg::SO3Command>(
+      "eagle4/so3_cmd_2", 10,
+      std::bind(&PiBridgeNode::so3_cmd_callback, this, std::placeholders::_1)
     );
+
+    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+      "eagle4/odom", 10,
+      std::bind(&PiBridgeNode::odom_callback, this, std::placeholders::_1)
+    );
+
 
     memset(&parser_, 0, sizeof(parser_));
 
@@ -182,16 +196,91 @@ private:
     }
   }
 
-  void cmd_callback(const std_msgs::msg::Float32MultiArray::SharedPtr msg) {
-    // Expect: [active_offboard, throttle_d, qw, qx, qy, qz] in ROS frames
-    if (msg->data.size() < 6) return;
-    cmd_active_   = msg->data[0];
-    cmd_throttle_ = msg->data[1];
-    cmd_qw_ = msg->data[2];
-    cmd_qx_ = msg->data[3];
-    cmd_qy_ = msg->data[4];
-    cmd_qz_ = msg->data[5];
+  //void cmd_callback(const std_msgs::msg::Float32MultiArray::SharedPtr msg) {
+  //  // Expect: [active_offboard, throttle_d, qw, qx, qy, qz] in ROS frames
+  //  if (msg->data.size() < 6) return;
+  //  cmd_active_   = msg->data[0];
+  //  cmd_throttle_ = msg->data[1];
+  //  cmd_qw_ = msg->data[2];
+  //  cmd_qx_ = msg->data[3];
+  //  cmd_qy_ = msg->data[4];
+  //  cmd_qz_ = msg->data[5];
+  //}
+
+  void so3_cmd_callback(const quadrotor_msgs::msg::SO3Command::SharedPtr msg) {
+
+    const Eigen::Vector3d fDes(msg->force.x, msg->force.y, msg->force.z);
+    const Eigen::Quaterniond qDes(msg->orientation.w, msg->orientation.x,
+                                msg->orientation.y, msg->orientation.z);
+
+    // get corrected yaw from odom
+    const tf2::Quaternion tfImuOdomYaw = getTfYaw(imuQ, odomQ);
+
+
+    Eigen::Quaterniond qDesTransformed =
+        Eigen::Quaterniond(tfImuOdomYaw.w(), tfImuOdomYaw.x(), tfImuOdomYaw.y(),
+                         tfImuOdomYaw.z()) * qDes;
+
+    // check psi for stability
+    const Eigen::Matrix3d rDes(qDes);
+    const Eigen::Matrix3d rCur(odomQ);
+    const float psi =
+      0.5f * (3.0f - (rDes(0, 0) * rCur(0, 0) + rDes(1, 0) * rCur(1, 0) +
+                      rDes(2, 0) * rCur(2, 0) + rDes(0, 1) * rCur(0, 1) +
+                      rDes(1, 1) * rCur(1, 1) + rDes(2, 1) * rCur(2, 1) +
+                      rDes(0, 2) * rCur(0, 2) + rDes(1, 2) * rCur(1, 2) +
+                      rDes(2, 2) * rCur(2, 2)));
+
+    if (psi > 1.0f)
+        RCLCPP_WARN(this->get_logger(),
+                "Psi(%f) > 1.0, orientation error is too large!", psi);
+
+    double throttle =
+        fDes(0) * rCur(0, 2) + fDes(1) * rCur(1, 2) + fDes(2) * rCur(2, 2);
+
+    cmd_throttle_ = throttle;
+    //cmd_qw_ = qDesTransformed.w();
+    //cmd_qx_ = qDesTransformed.x();
+    //cmd_qy_ = qDesTransformed.y();
+    //cmd_qz_ = qDesTransformed.z();
+
+    cmd_qw_ = qDes.w();
+    cmd_qx_ = qDes.x();
+    cmd_qy_ = qDes.y();
+    cmd_qz_ = qDes.z();
+
+      return;
   }
+
+  void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) {
+
+    odomQ.w() = msg->pose.pose.orientation.w;
+    odomQ.x() = msg->pose.pose.orientation.x;
+    odomQ.y() = msg->pose.pose.orientation.y;
+    odomQ.z() = msg->pose.pose.orientation.z;
+    return;
+  }
+
+
+tf2::Quaternion getTfYaw(Eigen::Quaterniond imu,
+                                          Eigen::Quaterniond odom) {
+  // convert to tf2::quaternion
+  tf2::Quaternion imuTf = tf2::Quaternion(imu.x(), imu.y(), imu.z(), imu.w());
+  tf2::Quaternion odomTf =
+      tf2::Quaternion(odom.x(), odom.y(), odom.z(), odom.w());
+
+  tf2::Matrix3x3(imuTf).getRPY(imuRoll, imuPitch, imuYaw);
+  tf2::Matrix3x3(odomTf).getRPY(odomRoll, odomPitch, odomYaw);
+
+  // create only yaw tf2::Quat
+  tf2::Quaternion imuTfYaw;
+  tf2::Quaternion odomTfYaw;
+  imuTfYaw.setRPY(0.0, 0.0, imuYaw);
+  odomTfYaw.setRPY(0.0, 0.0, odomYaw);
+  const tf2::Quaternion yawCorrection = imuTfYaw * odomTfYaw.inverse();
+
+  return yawCorrection;
+}
 
   static bool quat_is_sane(const Eigen::Quaterniond& q_in) {
     const double w = q_in.w(), x = q_in.x(), y = q_in.y(), z = q_in.z();
@@ -257,6 +346,10 @@ private:
 
               std::lock_guard<std::mutex> lk(state_mtx_);
               last_q_ros_ = q_ros;
+              imuQ.w() = last_q_ros_.w();
+              imuQ.x() = last_q_ros_.x();
+              imuQ.y() = last_q_ros_.y();
+              imuQ.z() = last_q_ros_.z();
               last_w_ros_ = w_ros;
               have_valid_state_ = true;
               last_state_stamp_ = this->now();
@@ -407,6 +500,8 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr att_sp_pub_;
 
   rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr cmd_sub_;
+  rclcpp::Subscription<quadrotor_msgs::msg::SO3Command>::SharedPtr so3_command_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
 
   rclcpp::TimerBase::SharedPtr rx_timer_;
   rclcpp::TimerBase::SharedPtr tx_timer_;
@@ -419,6 +514,11 @@ private:
   float cmd_qw_{1.0f}, cmd_qx_{0.0f}, cmd_qy_{0.0f}, cmd_qz_{0.0f};
 
   static PiBridgeNode* instance_;
+    
+  // Quternion odometry
+  Eigen::Quaterniond odomQ, imuQ;
+  double imuRoll, imuPitch, imuYaw;
+  double odomRoll, odomPitch, odomYaw;
 
   // last valid state (ROS frame) for odom
   std::mutex state_mtx_;

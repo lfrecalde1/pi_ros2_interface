@@ -18,6 +18,7 @@ find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(tf2_ros REQUIRED)
+find_package(quadrotor_msgs REQUIRED)
 
 # -------------------------
 # C library: pi_protocol
@@ -54,6 +55,7 @@ ament_target_dependencies(pi_bridge_node
   geometry_msgs
   Eigen3
   tf2_ros
+  quadrotor_msgs
 )
 
 target_include_directories(pi_bridge_node PRIVATE
