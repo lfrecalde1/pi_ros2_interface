@@ -6,6 +6,7 @@
 #include <geometry_msgs/msg/vector3_stamped.hpp>   // NEW: body-rate publisher
 
 #include <quadrotor_msgs/msg/so3_command.hpp>
+#include <quadrotor_msgs/msg/trpy_command.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 
@@ -73,6 +74,11 @@ public:
     so3_command_sub_ = create_subscription<quadrotor_msgs::msg::SO3Command>(
       "eagle4/so3_cmd_2", 10,
       std::bind(&PiBridgeNode::so3_cmd_callback, this, std::placeholders::_1)
+    );
+
+    trpy_command_sub_ = create_subscription<quadrotor_msgs::msg::TRPYCommand>(
+      "eagle4/trpy_cmd", 10,
+      std::bind(&PiBridgeNode::trpy_cmd_callback, this, std::placeholders::_1)
     );
 
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
@@ -244,6 +250,55 @@ private:
 
     double throttle =
         fDes(0) * rCur(0, 2) + fDes(1) * rCur(1, 2) + fDes(2) * rCur(2, 2);
+
+    // Store command (ROS frame)
+    cmd_throttle_ = (float)throttle;
+    cmd_qw_ = (float)qDesTransformed.w();
+    cmd_qx_ = (float)qDesTransformed.x();
+    cmd_qy_ = (float)qDesTransformed.y();
+    cmd_qz_ = (float)qDesTransformed.z();
+
+    // NEW: also store desired angular velocity (ROS body frame)
+    cmd_wx_ = (float)wDes_ros.x();
+    cmd_wy_ = (float)wDes_ros.y();
+    cmd_wz_ = (float)wDes_ros.z();
+  }
+
+  void trpy_cmd_callback(const quadrotor_msgs::msg::TRPYCommand::SharedPtr msg) {
+
+    // SO3Command orientation is in ROS convention already
+    const Eigen::Quaterniond qDes(msg->quaternion.w,
+                                 msg->quaternion.x,
+                                 msg->quaternion.y,
+                                 msg->quaternion.z);
+
+    // SO3Command angular_velocity is in ROS body frame already (assumed base_link FLU)
+    const Eigen::Vector3d wDes_ros(msg->angular_velocity.x,
+                                  msg->angular_velocity.y,
+                                  msg->angular_velocity.z);
+
+    // get corrected yaw from odom (your existing logic)
+    const tf2::Quaternion tfImuOdomYaw = getTfYaw(imuQ, odomQ);
+
+    Eigen::Quaterniond qDesTransformed =
+        Eigen::Quaterniond(tfImuOdomYaw.w(), tfImuOdomYaw.x(), tfImuOdomYaw.y(), tfImuOdomYaw.z()) * qDes;
+
+    // check psi for stability
+    const Eigen::Matrix3d rDes(qDes);
+    const Eigen::Matrix3d rCur(odomQ);
+    const float psi =
+      0.5f * (3.0f - (rDes(0, 0) * rCur(0, 0) + rDes(1, 0) * rCur(1, 0) +
+                      rDes(2, 0) * rCur(2, 0) + rDes(0, 1) * rCur(0, 1) +
+                      rDes(1, 1) * rCur(1, 1) + rDes(2, 1) * rCur(2, 1) +
+                      rDes(0, 2) * rCur(0, 2) + rDes(1, 2) * rCur(1, 2) +
+                      rDes(2, 2) * rCur(2, 2)));
+
+    if (psi > 1.0f) {
+      RCLCPP_WARN(this->get_logger(),
+                  "Psi(%f) > 1.0, orientation error is too large!", psi);
+    }
+
+    double throttle = msg->thrust;
 
     // Store command (ROS frame)
     cmd_throttle_ = (float)throttle;
@@ -551,10 +606,10 @@ private:
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr att_sp_pub_;
 
-  // NEW
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr att_sp_w_pub_;
 
   rclcpp::Subscription<quadrotor_msgs::msg::SO3Command>::SharedPtr so3_command_sub_;
+  rclcpp::Subscription<quadrotor_msgs::msg::TRPYCommand>::SharedPtr trpy_command_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
 
   rclcpp::TimerBase::SharedPtr rx_timer_;
