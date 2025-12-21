@@ -3,7 +3,7 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
-#include <geometry_msgs/msg/vector3_stamped.hpp>   // NEW: body-rate publisher
+#include <geometry_msgs/msg/vector3_stamped.hpp>   // desired body-rate publisher
 
 #include <quadrotor_msgs/msg/so3_command.hpp>
 #include <quadrotor_msgs/msg/trpy_command.hpp>
@@ -49,12 +49,39 @@ public:
     // independent publish rate for desired attitude + desired body-rate
     declare_parameter<double>("att_sp_rate_hz", 100.0);
 
+    // NEW: select which command callback is active: "so3" or "trpy"
+    declare_parameter<std::string>("cmd_mode", "so3");
+
     serial_device_ = get_parameter("serial_device").as_string();
     int baud = get_parameter("baud").as_int();
     double tx_rate_hz = get_parameter("tx_rate_hz").as_double();
     double rx_rate_hz = get_parameter("rx_rate_hz").as_double();
     double odom_rate_hz = get_parameter("odom_rate_hz").as_double();
     double att_sp_rate_hz = get_parameter("att_sp_rate_hz").as_double();
+
+    // NEW
+    cmd_mode_ = get_parameter("cmd_mode").as_string();
+
+    // NEW: allow runtime switching via `ros2 param set /pi_bridge_node cmd_mode so3|trpy`
+    on_set_parameters_callback_handle_ =
+      this->add_on_set_parameters_callback(
+        [this](const std::vector<rclcpp::Parameter>& params) {
+          rcl_interfaces::msg::SetParametersResult res;
+          res.successful = true;
+          for (const auto& p : params) {
+            if (p.get_name() == "cmd_mode") {
+              const auto v = p.as_string();
+              if (v == "so3" || v == "trpy") {
+                cmd_mode_ = v;
+                RCLCPP_INFO(this->get_logger(), "cmd_mode set to: %s", cmd_mode_.c_str());
+              } else {
+                res.successful = false;
+                res.reason = "cmd_mode must be 'so3' or 'trpy'";
+              }
+            }
+          }
+          return res;
+        });
 
     fd_ = open_serial(serial_device_.c_str(), baud);
     if (fd_ < 0) {
@@ -68,9 +95,10 @@ public:
     // publish desired attitude for RViz2
     att_sp_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("att_sp", 10);
 
-    // NEW: publish desired body-rate (angular velocity) in ROS body frame (FLU)
+    // publish desired body-rate (angular velocity) in ROS body frame (FLU)
     att_sp_w_pub_ = create_publisher<geometry_msgs::msg::Vector3Stamped>("att_sp_bodyrate", 10);
 
+    // Keep both subs; gate via cmd_mode_ (minimal modification)
     so3_command_sub_ = create_subscription<quadrotor_msgs::msg::SO3Command>(
       "eagle4/so3_cmd_2", 10,
       std::bind(&PiBridgeNode::so3_cmd_callback, this, std::placeholders::_1)
@@ -93,7 +121,7 @@ public:
     cmd_throttle_ = 0.001f;
     cmd_qw_=1.0f; cmd_qx_=0.0f; cmd_qy_=0.0f; cmd_qz_=0.0f;
 
-    // NEW: desired body-rate command (ROS frame, FLU)
+    // desired body-rate command (ROS frame, FLU)
     cmd_wx_ = 0.0f;
     cmd_wy_ = 0.0f;
     cmd_wz_ = 0.0f;
@@ -112,7 +140,7 @@ public:
       std::lock_guard<std::mutex> lk(sp_mtx_);
       have_valid_sp_ = false;
       last_q_sp_ros_ = Eigen::Quaterniond(1,0,0,0);
-      last_w_sp_ros_ = Eigen::Vector3d::Zero();   // NEW
+      last_w_sp_ros_ = Eigen::Vector3d::Zero();
       last_sp_stamp_ = this->now();
     }
 
@@ -144,15 +172,15 @@ public:
       std::bind(&PiBridgeNode::att_sp_spin, this)
     );
 
-    // NEW: Desired body-rate timer (same rate as att_sp, kept minimal)
+    // Desired body-rate timer (same rate as att_sp)
     att_sp_w_timer_ = create_wall_timer(
       std::chrono::microseconds(sp_period_us),
       std::bind(&PiBridgeNode::att_sp_w_spin, this)
     );
 
     RCLCPP_INFO(get_logger(),
-      "PI bridge running. Serial=%s rx=%.1fHz tx=%.1fHz odom=%.1fHz att_sp=%.1fHz",
-      serial_device_.c_str(), rx_rate_hz, tx_rate_hz, odom_rate_hz, att_sp_rate_hz);
+      "PI bridge running. Serial=%s rx=%.1fHz tx=%.1fHz odom=%.1fHz att_sp=%.1fHz cmd_mode=%s",
+      serial_device_.c_str(), rx_rate_hz, tx_rate_hz, odom_rate_hz, att_sp_rate_hz, cmd_mode_.c_str());
   }
 
   ~PiBridgeNode() override {
@@ -213,101 +241,68 @@ private:
     }
   }
 
+  // ---------------------------
+  // Command callbacks (GATED)
+  // ---------------------------
   void so3_cmd_callback(const quadrotor_msgs::msg::SO3Command::SharedPtr msg) {
+    if (cmd_mode_ != "so3") return;
+
     const Eigen::Vector3d fDes(msg->force.x, msg->force.y, msg->force.z);
 
-    // SO3Command orientation is in ROS convention already
     const Eigen::Quaterniond qDes(msg->orientation.w,
                                  msg->orientation.x,
                                  msg->orientation.y,
                                  msg->orientation.z);
 
-    // SO3Command angular_velocity is in ROS body frame already (assumed base_link FLU)
     const Eigen::Vector3d wDes_ros(msg->angular_velocity.x,
                                   msg->angular_velocity.y,
                                   msg->angular_velocity.z);
 
-    // get corrected yaw from odom (your existing logic)
     const tf2::Quaternion tfImuOdomYaw = getTfYaw(imuQ, odomQ);
 
     Eigen::Quaterniond qDesTransformed =
         Eigen::Quaterniond(tfImuOdomYaw.w(), tfImuOdomYaw.x(), tfImuOdomYaw.y(), tfImuOdomYaw.z()) * qDes;
 
-    // check psi for stability
-    const Eigen::Matrix3d rDes(qDes);
     const Eigen::Matrix3d rCur(odomQ);
-    const float psi =
-      0.5f * (3.0f - (rDes(0, 0) * rCur(0, 0) + rDes(1, 0) * rCur(1, 0) +
-                      rDes(2, 0) * rCur(2, 0) + rDes(0, 1) * rCur(0, 1) +
-                      rDes(1, 1) * rCur(1, 1) + rDes(2, 1) * rCur(2, 1) +
-                      rDes(0, 2) * rCur(0, 2) + rDes(1, 2) * rCur(1, 2) +
-                      rDes(2, 2) * rCur(2, 2)));
-
-    if (psi > 1.0f) {
-      RCLCPP_WARN(this->get_logger(),
-                  "Psi(%f) > 1.0, orientation error is too large!", psi);
-    }
-
     double throttle =
         fDes(0) * rCur(0, 2) + fDes(1) * rCur(1, 2) + fDes(2) * rCur(2, 2);
 
-    // Store command (ROS frame)
     cmd_throttle_ = (float)throttle;
     cmd_qw_ = (float)qDesTransformed.w();
     cmd_qx_ = (float)qDesTransformed.x();
     cmd_qy_ = (float)qDesTransformed.y();
     cmd_qz_ = (float)qDesTransformed.z();
 
-    // NEW: also store desired angular velocity (ROS body frame)
     cmd_wx_ = (float)wDes_ros.x();
     cmd_wy_ = (float)wDes_ros.y();
     cmd_wz_ = (float)wDes_ros.z();
   }
 
   void trpy_cmd_callback(const quadrotor_msgs::msg::TRPYCommand::SharedPtr msg) {
+    if (cmd_mode_ != "trpy") return;
 
-    // SO3Command orientation is in ROS convention already
     const Eigen::Quaterniond qDes(msg->quaternion.w,
                                  msg->quaternion.x,
                                  msg->quaternion.y,
                                  msg->quaternion.z);
 
-    // SO3Command angular_velocity is in ROS body frame already (assumed base_link FLU)
     const Eigen::Vector3d wDes_ros(msg->angular_velocity.x,
                                   msg->angular_velocity.y,
                                   msg->angular_velocity.z);
 
-    // get corrected yaw from odom (your existing logic)
     const tf2::Quaternion tfImuOdomYaw = getTfYaw(imuQ, odomQ);
 
     Eigen::Quaterniond qDesTransformed =
         Eigen::Quaterniond(tfImuOdomYaw.w(), tfImuOdomYaw.x(), tfImuOdomYaw.y(), tfImuOdomYaw.z()) * qDes;
 
-    // check psi for stability
-    const Eigen::Matrix3d rDes(qDes);
-    const Eigen::Matrix3d rCur(odomQ);
-    const float psi =
-      0.5f * (3.0f - (rDes(0, 0) * rCur(0, 0) + rDes(1, 0) * rCur(1, 0) +
-                      rDes(2, 0) * rCur(2, 0) + rDes(0, 1) * rCur(0, 1) +
-                      rDes(1, 1) * rCur(1, 1) + rDes(2, 1) * rCur(2, 1) +
-                      rDes(0, 2) * rCur(0, 2) + rDes(1, 2) * rCur(1, 2) +
-                      rDes(2, 2) * rCur(2, 2)));
+    const double throttle = msg->thrust;
 
-    if (psi > 1.0f) {
-      RCLCPP_WARN(this->get_logger(),
-                  "Psi(%f) > 1.0, orientation error is too large!", psi);
-    }
-
-    double throttle = msg->thrust;
-
-    // Store command (ROS frame)
     cmd_throttle_ = (float)throttle;
     cmd_qw_ = (float)qDesTransformed.w();
     cmd_qx_ = (float)qDesTransformed.x();
     cmd_qy_ = (float)qDesTransformed.y();
     cmd_qz_ = (float)qDesTransformed.z();
 
-    // NEW: also store desired angular velocity (ROS body frame)
     cmd_wx_ = (float)wDes_ros.x();
     cmd_wy_ = (float)wDes_ros.y();
     cmd_wz_ = (float)wDes_ros.z();
@@ -332,8 +327,7 @@ private:
     imuTfYaw.setRPY(0.0, 0.0, imuYaw);
     odomTfYaw.setRPY(0.0, 0.0, odomYaw);
 
-    const tf2::Quaternion yawCorrection = imuTfYaw * odomTfYaw.inverse();
-    return yawCorrection;
+    return imuTfYaw * odomTfYaw.inverse();
   }
 
   static bool quat_is_sane(const Eigen::Quaterniond& q_in) {
@@ -342,8 +336,7 @@ private:
     const double max_abs = 5.0;
     if (std::abs(w) > max_abs || std::abs(x) > max_abs || std::abs(y) > max_abs || std::abs(z) > max_abs) return false;
     const double n2 = w*w + x*x + y*y + z*z;
-    if (n2 < 1e-6) return false;
-    return true;
+    return (n2 >= 1e-6);
   }
 
   static bool vec_is_finite(const Eigen::Vector3d& v) {
@@ -361,7 +354,6 @@ private:
       if (id == PI_MSG_EAGLE_STATES_ID) {
 #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_STATES_MODE & PI_RX)
         if (piMsgEagleStatesRx) {
-          // raw publish
           std_msgs::msg::Float32MultiArray out;
           out.data.resize(11);
           out.data[0]  = (float)piMsgEagleStatesRx->time_us;
@@ -388,14 +380,11 @@ private:
 
           if (quat_is_sane(q_bf)) {
             q_bf.normalize();
-
-            // Betaflight -> ROS (same as your previous working version)
             Eigen::Quaterniond q_ros = Q_YAW_OFFSET * (NED_ENU_Q * q_bf * FRD_FLU_Q);
 
             if (quat_is_sane(q_ros) && vec_is_finite(w_bf)) {
               q_ros.normalize();
 
-              // Body rates FRD -> FLU only
               Eigen::Vector3d w_ros = FRD_FLU_Q.toRotationMatrix() * w_bf;
 
               std::lock_guard<std::mutex> lk(state_mtx_);
@@ -413,33 +402,27 @@ private:
       if (id == PI_MSG_EAGLE_RC_ATTITUDE_ID) {
 #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_RC_ATTITUDE_MODE & PI_RX)
         if (piMsgEagleRcAttitudeRx) {
-          // NOTE: you kept this topic as Float32MultiArray; leaving it as-is
           std_msgs::msg::Float32MultiArray out;
-          // If your RC_ATTITUDE now contains wx_d/wy_d/wz_d, you can expand this size accordingly.
           out.data.resize(9);
           out.data[0] = (float)piMsgEagleRcAttitudeRx->time_us;
           out.data[1] = piMsgEagleRcAttitudeRx->throttle_d;
 
-          // Attitude from betaflight
           out.data[2] = piMsgEagleRcAttitudeRx->qw_d;
           out.data[3] = piMsgEagleRcAttitudeRx->qx_d;
           out.data[4] = piMsgEagleRcAttitudeRx->qy_d;
           out.data[5] = piMsgEagleRcAttitudeRx->qz_d;
-          // Angular veloicty from betaflight
+
           out.data[6] = piMsgEagleRcAttitudeRx->wx_d;
           out.data[7] = piMsgEagleRcAttitudeRx->wy_d;
           out.data[8] = piMsgEagleRcAttitudeRx->wz_d;
 
           rc_pub_->publish(out);
 
-          // store desired attitude (Betaflight -> ROS) for RViz2
           Eigen::Quaterniond q_sp_bf(piMsgEagleRcAttitudeRx->qw_d,
                                      piMsgEagleRcAttitudeRx->qx_d,
                                      piMsgEagleRcAttitudeRx->qy_d,
                                      piMsgEagleRcAttitudeRx->qz_d);
 
-          // NEW: desired body-rate comes in Betaflight body frame (FRD)
-          // If your struct fields are named differently, adjust here.
           Eigen::Vector3d w_sp_bf(
               (double)piMsgEagleRcAttitudeRx->wx_d,
               (double)piMsgEagleRcAttitudeRx->wy_d,
@@ -452,7 +435,6 @@ private:
             if (quat_is_sane(q_sp_ros) && vec_is_finite(w_sp_bf)) {
               q_sp_ros.normalize();
 
-              // NEW: body-rate FRD -> FLU for ROS publishing (no NED/ENU, no yaw)
               Eigen::Vector3d w_sp_ros = FRD_FLU_Q.toRotationMatrix() * w_sp_bf;
 
               std::lock_guard<std::mutex> lk(sp_mtx_);
@@ -516,7 +498,6 @@ private:
     att_sp_pub_->publish(pose);
   }
 
-  // NEW: publish desired body-rate in ROS frame (FLU)
   void att_sp_w_spin() {
     Eigen::Vector3d wsp;
     {
@@ -527,7 +508,7 @@ private:
 
     geometry_msgs::msg::Vector3Stamped vmsg;
     vmsg.header.stamp = this->now();
-    vmsg.header.frame_id = "base_link";  // body rates are in body frame
+    vmsg.header.frame_id = "base_link";
 
     vmsg.vector.x = wsp.x();
     vmsg.vector.y = wsp.y();
@@ -547,15 +528,11 @@ private:
     piMsgEagleOffboardAttitudeTx.active_offboard = (uint8_t)(cmd_active_ > 0.5f);
     piMsgEagleOffboardAttitudeTx.throttle_d = cmd_throttle_;
 
-    // ROS -> Betaflight conversion before sending
     Eigen::Quaterniond q_cmd_ros(cmd_qw_, cmd_qx_, cmd_qy_, cmd_qz_);
 
     if (quat_is_sane(q_cmd_ros)) {
       q_cmd_ros.normalize();
 
-      // Inverse of RX mapping:
-      // q_ros = Q_YAW_OFFSET * (NED_ENU_Q * q_bf * FRD_FLU_Q)
-      // => q_bf = NED_ENU_Q^{-1} * Q_YAW_OFFSET^{-1} * q_ros * FRD_FLU_Q^{-1}
       Eigen::Quaterniond q_cmd_bf =
           NED_ENU_Q.inverse() *
           Q_YAW_OFFSET.inverse() *
@@ -568,19 +545,14 @@ private:
       piMsgEagleOffboardAttitudeTx.qy_d = (float)q_cmd_bf.y();
       piMsgEagleOffboardAttitudeTx.qz_d = (float)q_cmd_bf.z();
 
-      // NEW: desired body-rate ROS(FLU) -> Betaflight(FRD)
-      // IMPORTANT: only body-frame transform. Do NOT apply NED/ENU or yaw offsets.
       const Eigen::Vector3d w_cmd_ros((double)cmd_wx_, (double)cmd_wy_, (double)cmd_wz_);
-
-      // FIX: correct Eigen multiplication order (column vector)
-      const Eigen::Matrix3d R_frd_flu = FRD_FLU_Q.toRotationMatrix(); // maps FRD -> FLU
+      const Eigen::Matrix3d R_frd_flu = FRD_FLU_Q.toRotationMatrix(); // FRD -> FLU
       const Eigen::Vector3d w_cmd_bf  = R_frd_flu.transpose() * w_cmd_ros; // FLU -> FRD
 
       piMsgEagleOffboardAttitudeTx.wx_d = (float)w_cmd_bf.x();
       piMsgEagleOffboardAttitudeTx.wy_d = (float)w_cmd_bf.y();
       piMsgEagleOffboardAttitudeTx.wz_d = (float)w_cmd_bf.z();
     } else {
-      // safe fallback
       piMsgEagleOffboardAttitudeTx.qw_d = 1.0f;
       piMsgEagleOffboardAttitudeTx.qx_d = 0.0f;
       piMsgEagleOffboardAttitudeTx.qy_d = 0.0f;
@@ -605,7 +577,6 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr rc_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr att_sp_pub_;
-
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr att_sp_w_pub_;
 
   rclcpp::Subscription<quadrotor_msgs::msg::SO3Command>::SharedPtr so3_command_sub_;
@@ -616,14 +587,19 @@ private:
   rclcpp::TimerBase::SharedPtr tx_timer_;
   rclcpp::TimerBase::SharedPtr odom_timer_;
   rclcpp::TimerBase::SharedPtr att_sp_timer_;
-  rclcpp::TimerBase::SharedPtr att_sp_w_timer_;   // NEW
+  rclcpp::TimerBase::SharedPtr att_sp_w_timer_;
+
+  // NEW: command selection parameter
+  std::string cmd_mode_{"so3"};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+    on_set_parameters_callback_handle_;
 
   // command (ROS frame)
   float cmd_active_{1.0f};
   float cmd_throttle_{1.0f};
   float cmd_qw_{1.0f}, cmd_qx_{0.0f}, cmd_qy_{0.0f}, cmd_qz_{0.0f};
 
-  // NEW: desired angular velocity (ROS body frame, base_link FLU)
+  // desired angular velocity (ROS body frame, base_link FLU)
   float cmd_wx_{0.0f}, cmd_wy_{0.0f}, cmd_wz_{0.0f};
 
   static PiBridgeNode* instance_;
@@ -640,11 +616,11 @@ private:
   Eigen::Vector3d last_w_ros_{0,0,0};
   rclcpp::Time last_state_stamp_{0, 0, RCL_ROS_TIME};
 
-  // desired attitude + body-rate storage (ROS frame) for RViz2
+  // desired attitude + body-rate storage (ROS frame)
   std::mutex sp_mtx_;
   bool have_valid_sp_{false};
   Eigen::Quaterniond last_q_sp_ros_{1,0,0,0};
-  Eigen::Vector3d last_w_sp_ros_{0,0,0};   // NEW
+  Eigen::Vector3d last_w_sp_ros_{0,0,0};
   rclcpp::Time last_sp_stamp_{0, 0, RCL_ROS_TIME};
 };
 
