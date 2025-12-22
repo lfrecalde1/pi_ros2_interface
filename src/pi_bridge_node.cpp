@@ -4,6 +4,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/vector3_stamped.hpp>   // desired body-rate publisher
+#include <sensor_msgs/msg/imu.hpp>                 // NEW: IMU message
 
 #include <quadrotor_msgs/msg/so3_command.hpp>
 #include <quadrotor_msgs/msg/trpy_command.hpp>
@@ -49,7 +50,7 @@ public:
     // independent publish rate for desired attitude + desired body-rate
     declare_parameter<double>("att_sp_rate_hz", 100.0);
 
-    // NEW: select which command callback is active: "so3" or "trpy"
+    // select which command callback is active: "so3" or "trpy"
     declare_parameter<std::string>("cmd_mode", "so3");
 
     serial_device_ = get_parameter("serial_device").as_string();
@@ -59,10 +60,9 @@ public:
     double odom_rate_hz = get_parameter("odom_rate_hz").as_double();
     double att_sp_rate_hz = get_parameter("att_sp_rate_hz").as_double();
 
-    // NEW
     cmd_mode_ = get_parameter("cmd_mode").as_string();
 
-    // NEW: allow runtime switching via `ros2 param set /pi_bridge_node cmd_mode so3|trpy`
+    // allow runtime switching via `ros2 param set /pi_bridge_node cmd_mode so3|trpy`
     on_set_parameters_callback_handle_ =
       this->add_on_set_parameters_callback(
         [this](const std::vector<rclcpp::Parameter>& params) {
@@ -92,13 +92,16 @@ public:
     rc_pub_     = create_publisher<std_msgs::msg::Float32MultiArray>("rc_attitude", 10);
     odom_pub_   = create_publisher<nav_msgs::msg::Odometry>("odom_betaflight", 10);
 
+    // NEW: publish IMU (same rate as odom_spin)
+    imu_pub_    = create_publisher<sensor_msgs::msg::Imu>("eagle4/imu", 10);
+
     // publish desired attitude for RViz2
     att_sp_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("att_sp", 10);
 
     // publish desired body-rate (angular velocity) in ROS body frame (FLU)
     att_sp_w_pub_ = create_publisher<geometry_msgs::msg::Vector3Stamped>("att_sp_bodyrate", 10);
 
-    // Keep both subs; gate via cmd_mode_ (minimal modification)
+    // Keep both subs; gate via cmd_mode_
     so3_command_sub_ = create_subscription<quadrotor_msgs::msg::SO3Command>(
       "eagle4/so3_cmd_2", 10,
       std::bind(&PiBridgeNode::so3_cmd_callback, this, std::placeholders::_1)
@@ -158,7 +161,7 @@ public:
       std::bind(&PiBridgeNode::tx_spin, this)
     );
 
-    // ODOM timer
+    // ODOM timer (also drives IMU publishing inside odom_spin)
     auto odom_period_us = (int64_t)(1e6 / std::max(1e-6, odom_rate_hz));
     odom_timer_ = create_wall_timer(
       std::chrono::microseconds(odom_period_us),
@@ -461,8 +464,10 @@ private:
       w = last_w_ros_;
     }
 
+    const auto stamp = this->now();
+
     nav_msgs::msg::Odometry odom;
-    odom.header.stamp = this->now();
+    odom.header.stamp = stamp;
     odom.header.frame_id = "world";
     odom.child_frame_id  = "base_link";
 
@@ -476,6 +481,28 @@ private:
     odom.twist.twist.angular.z = w.z();
 
     odom_pub_->publish(odom);
+
+    sensor_msgs::msg::Imu imu_msg;
+    imu_msg.header.stamp = stamp;
+    imu_msg.header.frame_id = "base_link";  // angular velocity is body-frame
+
+    // Optional: publish the same orientation you already publish in odom
+    imu_msg.orientation.w = q.w();
+    imu_msg.orientation.x = q.x();
+    imu_msg.orientation.y = q.y();
+    imu_msg.orientation.z = q.z();
+
+    imu_msg.angular_velocity.x = w.x();
+    imu_msg.angular_velocity.y = w.y();
+    imu_msg.angular_velocity.z = w.z();
+
+    // No accel available in this function (minimal change)
+    imu_msg.linear_acceleration.x = 0.0;
+    imu_msg.linear_acceleration.y = 0.0;
+    imu_msg.linear_acceleration.z = 0.0;
+
+    // Keep covariances as default zeros for minimal modification.
+    imu_pub_->publish(imu_msg);
   }
 
   void att_sp_spin() {
@@ -576,6 +603,8 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr states_pub_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr rc_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;  // NEW
+
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr att_sp_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr att_sp_w_pub_;
 
@@ -589,7 +618,7 @@ private:
   rclcpp::TimerBase::SharedPtr att_sp_timer_;
   rclcpp::TimerBase::SharedPtr att_sp_w_timer_;
 
-  // NEW: command selection parameter
+  // command selection parameter
   std::string cmd_mode_{"so3"};
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
     on_set_parameters_callback_handle_;
