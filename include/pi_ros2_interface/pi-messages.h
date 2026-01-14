@@ -789,7 +789,7 @@ __attribute__((unused)) static inline void piPrintMsgDummyMessage(int (* printer
 #define PI_MSG_EAGLE_STATES_MODE PI_RXTX
 
 #define PI_MSG_EAGLE_STATES_ID 13
-#define PI_MSG_EAGLE_STATES_PAYLOAD_LEN 44
+#define PI_MSG_EAGLE_STATES_PAYLOAD_LEN 88
 
 // msg definition
 typedef struct __pi_EAGLE_STATES_t
@@ -801,13 +801,24 @@ typedef struct __pi_EAGLE_STATES_t
     float ax;
     float ay;
     float az;
+    float ax_filtered;
+    float ay_filtered;
+    float az_filtered;
     float wx;
     float wy;
     float wz;
+    float wx_dot_filtered;
+    float wy_dot_filtered;
+    float wz_dot_filtered;
     float qw;
     float qx;
     float qy;
     float qz;
+    float motor_0;
+    float motor_1;
+    float motor_2;
+    float motor_3;
+    float aux;
 } __attribute__((packed)) pi_EAGLE_STATES_t;
 
 // todo: we can save on memory, if we use a union as the tx-buffer and not
@@ -827,17 +838,28 @@ extern pi_msg_rx_state_t piMsgEagleStatesRxState;
 __attribute__((unused)) static inline void piPrintMsgEagleStates(int (* printer)(const char* fmt, ...)) {
     printer("%s\n", "EagleStates");
     if (piMsgEagleStatesRx) {
-        printer("    piMsgEagleStatesRx.%s%1s %u\n", "time_us", ":", piMsgEagleStatesRx->time_us);
-        printer("    piMsgEagleStatesRx.%s%6s %f\n", "ax", ":", (double)piMsgEagleStatesRx->ax);
-        printer("    piMsgEagleStatesRx.%s%6s %f\n", "ay", ":", (double)piMsgEagleStatesRx->ay);
-        printer("    piMsgEagleStatesRx.%s%6s %f\n", "az", ":", (double)piMsgEagleStatesRx->az);
-        printer("    piMsgEagleStatesRx.%s%6s %f\n", "wx", ":", (double)piMsgEagleStatesRx->wx);
-        printer("    piMsgEagleStatesRx.%s%6s %f\n", "wy", ":", (double)piMsgEagleStatesRx->wy);
-        printer("    piMsgEagleStatesRx.%s%6s %f\n", "wz", ":", (double)piMsgEagleStatesRx->wz);
-        printer("    piMsgEagleStatesRx.%s%6s %f\n", "qw", ":", (double)piMsgEagleStatesRx->qw);
-        printer("    piMsgEagleStatesRx.%s%6s %f\n", "qx", ":", (double)piMsgEagleStatesRx->qx);
-        printer("    piMsgEagleStatesRx.%s%6s %f\n", "qy", ":", (double)piMsgEagleStatesRx->qy);
-        printer("    piMsgEagleStatesRx.%s%6s %f\n", "qz", ":", (double)piMsgEagleStatesRx->qz);
+        printer("    piMsgEagleStatesRx.%s%9s %u\n", "time_us", ":", piMsgEagleStatesRx->time_us);
+        printer("    piMsgEagleStatesRx.%s%14s %f\n", "ax", ":", (double)piMsgEagleStatesRx->ax);
+        printer("    piMsgEagleStatesRx.%s%14s %f\n", "ay", ":", (double)piMsgEagleStatesRx->ay);
+        printer("    piMsgEagleStatesRx.%s%14s %f\n", "az", ":", (double)piMsgEagleStatesRx->az);
+        printer("    piMsgEagleStatesRx.%s%5s %f\n", "ax_filtered", ":", (double)piMsgEagleStatesRx->ax_filtered);
+        printer("    piMsgEagleStatesRx.%s%5s %f\n", "ay_filtered", ":", (double)piMsgEagleStatesRx->ay_filtered);
+        printer("    piMsgEagleStatesRx.%s%5s %f\n", "az_filtered", ":", (double)piMsgEagleStatesRx->az_filtered);
+        printer("    piMsgEagleStatesRx.%s%14s %f\n", "wx", ":", (double)piMsgEagleStatesRx->wx);
+        printer("    piMsgEagleStatesRx.%s%14s %f\n", "wy", ":", (double)piMsgEagleStatesRx->wy);
+        printer("    piMsgEagleStatesRx.%s%14s %f\n", "wz", ":", (double)piMsgEagleStatesRx->wz);
+        printer("    piMsgEagleStatesRx.%s%1s %f\n", "wx_dot_filtered", ":", (double)piMsgEagleStatesRx->wx_dot_filtered);
+        printer("    piMsgEagleStatesRx.%s%1s %f\n", "wy_dot_filtered", ":", (double)piMsgEagleStatesRx->wy_dot_filtered);
+        printer("    piMsgEagleStatesRx.%s%1s %f\n", "wz_dot_filtered", ":", (double)piMsgEagleStatesRx->wz_dot_filtered);
+        printer("    piMsgEagleStatesRx.%s%14s %f\n", "qw", ":", (double)piMsgEagleStatesRx->qw);
+        printer("    piMsgEagleStatesRx.%s%14s %f\n", "qx", ":", (double)piMsgEagleStatesRx->qx);
+        printer("    piMsgEagleStatesRx.%s%14s %f\n", "qy", ":", (double)piMsgEagleStatesRx->qy);
+        printer("    piMsgEagleStatesRx.%s%14s %f\n", "qz", ":", (double)piMsgEagleStatesRx->qz);
+        printer("    piMsgEagleStatesRx.%s%9s %f\n", "motor_0", ":", (double)piMsgEagleStatesRx->motor_0);
+        printer("    piMsgEagleStatesRx.%s%9s %f\n", "motor_1", ":", (double)piMsgEagleStatesRx->motor_1);
+        printer("    piMsgEagleStatesRx.%s%9s %f\n", "motor_2", ":", (double)piMsgEagleStatesRx->motor_2);
+        printer("    piMsgEagleStatesRx.%s%9s %f\n", "motor_3", ":", (double)piMsgEagleStatesRx->motor_3);
+        printer("    piMsgEagleStatesRx.%s%13s %f\n", "aux", ":", (double)piMsgEagleStatesRx->aux);
     } else {
         printer("    piMsgEagleStatesRx is NULL. Message likely not received yet.\n");
     }

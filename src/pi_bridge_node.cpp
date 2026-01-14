@@ -11,6 +11,8 @@
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 
+#include <quadrotor_msgs/msg/so3_command.hpp>
+
 #include <fcntl.h>
 #include <termios.h>
 #include <unistd.h>
@@ -135,6 +137,8 @@ public:
       have_valid_state_ = true;
       last_q_ros_ = Eigen::Quaterniond(1,0,0,0);
       last_w_ros_ = Eigen::Vector3d::Zero();
+      last_w_dot_filtered_ros_ = Eigen::Vector3d::Zero();
+      last_motor_ros_ = Eigen::Vector4d::Zero();
       last_state_stamp_ = this->now();
     }
 
@@ -346,6 +350,13 @@ private:
     return std::isfinite(v.x()) && std::isfinite(v.y()) && std::isfinite(v.z());
   }
 
+  static bool motors_is_finite(const Eigen::Vector4d& v)
+{
+    return std::isfinite(v.x()) &&
+           std::isfinite(v.y()) &&
+           std::isfinite(v.z()) &&
+           std::isfinite(v.w());
+}
   void rx_spin() {
     uint8_t buf[256];
     ssize_t n = ::read(fd_, buf, sizeof(buf));
@@ -358,42 +369,73 @@ private:
 #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_STATES_MODE & PI_RX)
         if (piMsgEagleStatesRx) {
           std_msgs::msg::Float32MultiArray out;
-          out.data.resize(11);
+          out.data.resize(21);
           out.data[0]  = (float)piMsgEagleStatesRx->time_us;
           out.data[1]  = piMsgEagleStatesRx->ax;
           out.data[2]  = piMsgEagleStatesRx->ay;
           out.data[3]  = piMsgEagleStatesRx->az;
+
           out.data[4]  = piMsgEagleStatesRx->wx;
           out.data[5]  = piMsgEagleStatesRx->wy;
           out.data[6]  = piMsgEagleStatesRx->wz;
+
           out.data[7]  = piMsgEagleStatesRx->qw;
           out.data[8]  = piMsgEagleStatesRx->qx;
           out.data[9]  = piMsgEagleStatesRx->qy;
           out.data[10] = piMsgEagleStatesRx->qz;
+
+          out.data[11]  = piMsgEagleStatesRx->ax_filtered;
+          out.data[12]  = piMsgEagleStatesRx->ay_filtered;
+          out.data[13]  = piMsgEagleStatesRx->az_filtered;
+
+          out.data[14]  = piMsgEagleStatesRx->wx_dot_filtered;
+          out.data[15]  = piMsgEagleStatesRx->wy_dot_filtered;
+          out.data[16]  = piMsgEagleStatesRx->wz_dot_filtered;
+
+          out.data[17]  = piMsgEagleStatesRx->motor_0;
+          out.data[18]  = piMsgEagleStatesRx->motor_1;
+          out.data[19]  = piMsgEagleStatesRx->motor_2;
+          out.data[20]  = piMsgEagleStatesRx->motor_3;
+
+
           states_pub_->publish(out);
 
           Eigen::Quaterniond q_bf(piMsgEagleStatesRx->qw,
                                   piMsgEagleStatesRx->qx,
                                   piMsgEagleStatesRx->qy,
                                   piMsgEagleStatesRx->qz);
-
+          // Angular velocity
           Eigen::Vector3d w_bf(piMsgEagleStatesRx->wx,
                                piMsgEagleStatesRx->wy,
                                piMsgEagleStatesRx->wz);
+
+          // Angular acceleration
+          Eigen::Vector3d w_dot_filtered_bf(piMsgEagleStatesRx->wx_dot_filtered,
+                               piMsgEagleStatesRx->wy_dot_filtered,
+                               piMsgEagleStatesRx->wz_dot_filtered);
+
+          //motors velocities
+          Eigen::Vector4d motors_velocity_raw(piMsgEagleStatesRx->motor_0,
+                               piMsgEagleStatesRx->motor_1,
+                               piMsgEagleStatesRx->motor_2,
+                               piMsgEagleStatesRx->motor_3);
 
           if (quat_is_sane(q_bf)) {
             q_bf.normalize();
             Eigen::Quaterniond q_ros = Q_YAW_OFFSET * (NED_ENU_Q * q_bf * FRD_FLU_Q);
 
-            if (quat_is_sane(q_ros) && vec_is_finite(w_bf)) {
+            if (quat_is_sane(q_ros) && vec_is_finite(w_bf) && motors_is_finite(motors_velocity_raw)) {
               q_ros.normalize();
 
               Eigen::Vector3d w_ros = FRD_FLU_Q.toRotationMatrix() * w_bf;
+              Eigen::Vector3d w_dot_filtered_ros = FRD_FLU_Q.toRotationMatrix() * w_dot_filtered_bf;
 
               std::lock_guard<std::mutex> lk(state_mtx_);
               last_q_ros_ = q_ros;
               imuQ = last_q_ros_;
               last_w_ros_ = w_ros;
+              last_w_dot_filtered_ros_ = w_dot_filtered_ros;
+              last_motor_ros_ = motors_velocity_raw;
               have_valid_state_ = true;
               last_state_stamp_ = this->now();
             }
@@ -643,6 +685,8 @@ private:
   bool have_valid_state_{false};
   Eigen::Quaterniond last_q_ros_{1,0,0,0};
   Eigen::Vector3d last_w_ros_{0,0,0};
+  Eigen::Vector3d last_w_dot_filtered_ros_{0,0,0};
+  Eigen::Vector4d last_motor_ros_{0,0,0,0};
   rclcpp::Time last_state_stamp_{0, 0, RCL_ROS_TIME};
 
   // desired attitude + body-rate storage (ROS frame)

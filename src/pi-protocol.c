@@ -31,7 +31,6 @@ extern "C" {
 #include <stdio.h>
 #include "pi_ros2_interface/pi-protocol.h"
 #include "pi_ros2_interface/pi-messages.h"
-
 // well known slow (without lookup tables) crc8 code taken from betaflight
 uint8_t crc8_calc_pi(uint8_t crc, unsigned char a, uint8_t poly)
 {
