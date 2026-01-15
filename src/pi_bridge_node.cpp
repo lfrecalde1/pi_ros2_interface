@@ -3,15 +3,16 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
-#include <geometry_msgs/msg/vector3_stamped.hpp>   // desired body-rate publisher
-#include <sensor_msgs/msg/imu.hpp>                 // NEW: IMU message
+#include <geometry_msgs/msg/vector3_stamped.hpp>
+#include <quadrotor_msgs/msg/beta_flight_states.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 
 #include <quadrotor_msgs/msg/so3_command.hpp>
 #include <quadrotor_msgs/msg/trpy_command.hpp>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Quaternion.h>
 
-#include <quadrotor_msgs/msg/so3_command.hpp>
+
 
 #include <fcntl.h>
 #include <termios.h>
@@ -47,7 +48,7 @@ public:
 
     // independent publish rates
     declare_parameter<double>("rx_rate_hz", 1000.0);
-    declare_parameter<double>("odom_rate_hz", 500.0);
+    declare_parameter<double>("beta_states_rate_hz", 500.0);
 
     // independent publish rate for desired attitude + desired body-rate
     declare_parameter<double>("att_sp_rate_hz", 100.0);
@@ -59,7 +60,7 @@ public:
     int baud = get_parameter("baud").as_int();
     double tx_rate_hz = get_parameter("tx_rate_hz").as_double();
     double rx_rate_hz = get_parameter("rx_rate_hz").as_double();
-    double odom_rate_hz = get_parameter("odom_rate_hz").as_double();
+    double beta_states_rate_hz = get_parameter("beta_states_rate_hz").as_double();
     double att_sp_rate_hz = get_parameter("att_sp_rate_hz").as_double();
 
     cmd_mode_ = get_parameter("cmd_mode").as_string();
@@ -90,18 +91,20 @@ public:
       throw std::runtime_error("Failed to open serial: " + serial_device_);
     }
 
-    states_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>("states", 10);
-    rc_pub_     = create_publisher<std_msgs::msg::Float32MultiArray>("rc_attitude", 10);
-    odom_pub_   = create_publisher<nav_msgs::msg::Odometry>("odom_betaflight", 10);
+    states_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>("eagle4/states", 10);
+    rc_pub_     = create_publisher<std_msgs::msg::Float32MultiArray>("eagle4/rc_attitude", 10);
+
+    // Publisher Betaflight states
+    beta_pub_   = create_publisher<quadrotor_msgs::msg::BetaFlightStates>("eagle4/betafligh", 10);
 
     // NEW: publish IMU (same rate as odom_spin)
     imu_pub_    = create_publisher<sensor_msgs::msg::Imu>("eagle4/imu", 10);
 
     // publish desired attitude for RViz2
-    att_sp_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("att_sp", 10);
+    att_sp_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("eagle4/att_sp", 10);
 
     // publish desired body-rate (angular velocity) in ROS body frame (FLU)
-    att_sp_w_pub_ = create_publisher<geometry_msgs::msg::Vector3Stamped>("att_sp_bodyrate", 10);
+    att_sp_w_pub_ = create_publisher<geometry_msgs::msg::Vector3Stamped>("eagle4/att_sp_bodyrate", 10);
 
     // Keep both subs; gate via cmd_mode_
     so3_command_sub_ = create_subscription<quadrotor_msgs::msg::SO3Command>(
@@ -138,6 +141,8 @@ public:
       last_q_ros_ = Eigen::Quaterniond(1,0,0,0);
       last_w_ros_ = Eigen::Vector3d::Zero();
       last_w_dot_filtered_ros_ = Eigen::Vector3d::Zero();
+      last_linear_acceleration_filtered_ros_ = Eigen::Vector3d::Zero();
+      last_linear_acceleration_ros_ = Eigen::Vector3d::Zero();
       last_motor_ros_ = Eigen::Vector4d::Zero();
       last_state_stamp_ = this->now();
     }
@@ -165,11 +170,11 @@ public:
       std::bind(&PiBridgeNode::tx_spin, this)
     );
 
-    // ODOM timer (also drives IMU publishing inside odom_spin)
-    auto odom_period_us = (int64_t)(1e6 / std::max(1e-6, odom_rate_hz));
+    // ODOM timer
+    auto beta_states_period_us = (int64_t)(1e6 / std::max(1e-6, beta_states_rate_hz));
     odom_timer_ = create_wall_timer(
-      std::chrono::microseconds(odom_period_us),
-      std::bind(&PiBridgeNode::odom_spin, this)
+      std::chrono::microseconds(beta_states_period_us),
+      std::bind(&PiBridgeNode::beta_spin, this)
     );
 
     // Desired attitude timer
@@ -186,8 +191,8 @@ public:
     );
 
     RCLCPP_INFO(get_logger(),
-      "PI bridge running. Serial=%s rx=%.1fHz tx=%.1fHz odom=%.1fHz att_sp=%.1fHz cmd_mode=%s",
-      serial_device_.c_str(), rx_rate_hz, tx_rate_hz, odom_rate_hz, att_sp_rate_hz, cmd_mode_.c_str());
+      "PI bridge running. Serial=%s rx=%.1fHz tx=%.1fHz beta=%.1fHz att_sp=%.1fHz cmd_mode=%s",
+      serial_device_.c_str(), rx_rate_hz, tx_rate_hz, beta_states_rate_hz, att_sp_rate_hz, cmd_mode_.c_str());
   }
 
   ~PiBridgeNode() override {
@@ -400,6 +405,7 @@ private:
 
           states_pub_->publish(out);
 
+          // Quaternion
           Eigen::Quaterniond q_bf(piMsgEagleStatesRx->qw,
                                   piMsgEagleStatesRx->qx,
                                   piMsgEagleStatesRx->qy,
@@ -414,28 +420,48 @@ private:
                                piMsgEagleStatesRx->wy_dot_filtered,
                                piMsgEagleStatesRx->wz_dot_filtered);
 
-          //motors velocities
+          // Motors velocities
           Eigen::Vector4d motors_velocity_raw(piMsgEagleStatesRx->motor_0,
                                piMsgEagleStatesRx->motor_1,
                                piMsgEagleStatesRx->motor_2,
                                piMsgEagleStatesRx->motor_3);
+          // Linear Acceleration
+          Eigen::Vector3d linear_acceleration_filtered_raw(piMsgEagleStatesRx->ax_filtered,
+                               piMsgEagleStatesRx->ay_filtered,
+                               piMsgEagleStatesRx->az_filtered);
+
+          Eigen::Vector3d linear_acceleration_raw(piMsgEagleStatesRx->ax,
+                               piMsgEagleStatesRx->ay,
+                               piMsgEagleStatesRx->az);
 
           if (quat_is_sane(q_bf)) {
             q_bf.normalize();
             Eigen::Quaterniond q_ros = Q_YAW_OFFSET * (NED_ENU_Q * q_bf * FRD_FLU_Q);
 
-            if (quat_is_sane(q_ros) && vec_is_finite(w_bf) && motors_is_finite(motors_velocity_raw)) {
+            if (quat_is_sane(q_ros) && vec_is_finite(w_bf) && motors_is_finite(motors_velocity_raw) && vec_is_finite(linear_acceleration_filtered_raw) && vec_is_finite(linear_acceleration_raw) && vec_is_finite(w_dot_filtered_bf)) {
               q_ros.normalize();
 
               Eigen::Vector3d w_ros = FRD_FLU_Q.toRotationMatrix() * w_bf;
               Eigen::Vector3d w_dot_filtered_ros = FRD_FLU_Q.toRotationMatrix() * w_dot_filtered_bf;
+              Eigen::Vector3d linear_acceleration_filtered_ros = FRD_FLU_Q.toRotationMatrix() * linear_acceleration_filtered_raw;
+              Eigen::Vector3d linear_acceleration_ros = FRD_FLU_Q.toRotationMatrix() * linear_acceleration_raw;
 
               std::lock_guard<std::mutex> lk(state_mtx_);
+              // Quaternion filtered
               last_q_ros_ = q_ros;
               imuQ = last_q_ros_;
+
+              // Angular velocity filtered
               last_w_ros_ = w_ros;
               last_w_dot_filtered_ros_ = w_dot_filtered_ros;
+            
+              // motors filtered
               last_motor_ros_ = motors_velocity_raw;
+
+              // acceleration
+              last_linear_acceleration_filtered_ros_ = linear_acceleration_filtered_ros;
+              last_linear_acceleration_ros_ = linear_acceleration_ros;
+
               have_valid_state_ = true;
               last_state_stamp_ = this->now();
             }
@@ -444,34 +470,34 @@ private:
 #endif
       }
 
-      if (id == PI_MSG_EAGLE_RC_ATTITUDE_ID) {
-#if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_RC_ATTITUDE_MODE & PI_RX)
-        if (piMsgEagleRcAttitudeRx) {
+      if (id == PI_MSG_EAGLE_ONBOARD_CONTROL_ID) {
+#if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_ONBOARD_CONTROL_MODE & PI_RX)
+        if (piMsgEagleOnboardControlRx) {
           std_msgs::msg::Float32MultiArray out;
           out.data.resize(9);
-          out.data[0] = (float)piMsgEagleRcAttitudeRx->time_us;
-          out.data[1] = piMsgEagleRcAttitudeRx->throttle_d;
+          out.data[0] = (float)piMsgEagleOnboardControlRx->time_us;
+          out.data[1] = piMsgEagleOnboardControlRx->throttle_d;
 
-          out.data[2] = piMsgEagleRcAttitudeRx->qw_d;
-          out.data[3] = piMsgEagleRcAttitudeRx->qx_d;
-          out.data[4] = piMsgEagleRcAttitudeRx->qy_d;
-          out.data[5] = piMsgEagleRcAttitudeRx->qz_d;
+          out.data[2] = piMsgEagleOnboardControlRx->qw_d;
+          out.data[3] = piMsgEagleOnboardControlRx->qx_d;
+          out.data[4] = piMsgEagleOnboardControlRx->qy_d;
+          out.data[5] = piMsgEagleOnboardControlRx->qz_d;
 
-          out.data[6] = piMsgEagleRcAttitudeRx->wx_d;
-          out.data[7] = piMsgEagleRcAttitudeRx->wy_d;
-          out.data[8] = piMsgEagleRcAttitudeRx->wz_d;
+          out.data[6] = piMsgEagleOnboardControlRx->wx_d;
+          out.data[7] = piMsgEagleOnboardControlRx->wy_d;
+          out.data[8] = piMsgEagleOnboardControlRx->wz_d;
 
           rc_pub_->publish(out);
 
-          Eigen::Quaterniond q_sp_bf(piMsgEagleRcAttitudeRx->qw_d,
-                                     piMsgEagleRcAttitudeRx->qx_d,
-                                     piMsgEagleRcAttitudeRx->qy_d,
-                                     piMsgEagleRcAttitudeRx->qz_d);
+          Eigen::Quaterniond q_sp_bf(piMsgEagleOnboardControlRx->qw_d,
+                                     piMsgEagleOnboardControlRx->qx_d,
+                                     piMsgEagleOnboardControlRx->qy_d,
+                                     piMsgEagleOnboardControlRx->qz_d);
 
           Eigen::Vector3d w_sp_bf(
-              (double)piMsgEagleRcAttitudeRx->wx_d,
-              (double)piMsgEagleRcAttitudeRx->wy_d,
-              (double)piMsgEagleRcAttitudeRx->wz_d);
+              (double)piMsgEagleOnboardControlRx->wx_d,
+              (double)piMsgEagleOnboardControlRx->wy_d,
+              (double)piMsgEagleOnboardControlRx->wz_d);
 
           if (quat_is_sane(q_sp_bf)) {
             q_sp_bf.normalize();
@@ -495,35 +521,69 @@ private:
     }
   }
 
-  void odom_spin() {
+  void beta_spin() {
     Eigen::Quaterniond q;
     Eigen::Vector3d w;
+    Eigen::Vector3d a_filtered;
+    Eigen::Vector3d a;
+    Eigen::Vector3d w_dot_filtered;
+    Eigen::Vector4d motors;
 
     {
       std::lock_guard<std::mutex> lk(state_mtx_);
       if (!have_valid_state_) return;
       q = last_q_ros_;
       w = last_w_ros_;
+      a_filtered = last_linear_acceleration_filtered_ros_;
+      a = last_linear_acceleration_ros_;
+      w_dot_filtered = last_w_dot_filtered_ros_;
+      motors = last_motor_ros_;
+
     }
 
     const auto stamp = this->now();
+    quadrotor_msgs::msg::BetaFlightStates beta_flight_msg;
+    beta_flight_msg.header.stamp = stamp;
+    beta_flight_msg.header.frame_id = "base_link";
 
-    nav_msgs::msg::Odometry odom;
-    odom.header.stamp = stamp;
-    odom.header.frame_id = "world";
-    odom.child_frame_id  = "base_link";
+    /*
+    geometry_msgs/Vector3 linear_acceleration
+    geometry_msgs/Vector3 angular_velocity
+    geometry_msgs/Quaternion quaternion 
+    geometry_msgs/Vector3 linear_acceleration_filtered
+    geometry_msgs/Vector3 angular_acceleration_filtered
+    float64[4] rpm*/
+    beta_flight_msg.linear_acceleration.x = a.x();
+    beta_flight_msg.linear_acceleration.y = a.y();
+    beta_flight_msg.linear_acceleration.z = a.z();
 
-    odom.pose.pose.orientation.w = q.w();
-    odom.pose.pose.orientation.x = q.x();
-    odom.pose.pose.orientation.y = q.y();
-    odom.pose.pose.orientation.z = q.z();
+    beta_flight_msg.linear_acceleration_filtered.x = a_filtered.x();
+    beta_flight_msg.linear_acceleration_filtered.y = a_filtered.y();
+    beta_flight_msg.linear_acceleration_filtered.z = a_filtered.z();
 
-    odom.twist.twist.angular.x = w.x();
-    odom.twist.twist.angular.y = w.y();
-    odom.twist.twist.angular.z = w.z();
+    beta_flight_msg.angular_velocity.x = w.x();
+    beta_flight_msg.angular_velocity.y = w.y();
+    beta_flight_msg.angular_velocity.z = w.z();
 
-    odom_pub_->publish(odom);
+    beta_flight_msg.quaternion.w = q.w();
+    beta_flight_msg.quaternion.x = q.x();
+    beta_flight_msg.quaternion.y = q.y();
+    beta_flight_msg.quaternion.z = q.z();
 
+    beta_flight_msg.angular_acceleration_filtered.x = w_dot_filtered.x();
+    beta_flight_msg.angular_acceleration_filtered.y = w_dot_filtered.y();
+    beta_flight_msg.angular_acceleration_filtered.z = w_dot_filtered.z();
+
+    beta_flight_msg.motor[0] = motors.x();
+    beta_flight_msg.motor[1] = motors.y();
+    beta_flight_msg.motor[2] = motors.z();
+    beta_flight_msg.motor[3] = motors.w();
+
+    beta_pub_->publish(beta_flight_msg);
+
+
+    
+    // IMU message
     sensor_msgs::msg::Imu imu_msg;
     imu_msg.header.stamp = stamp;
     imu_msg.header.frame_id = "base_link";  // angular velocity is body-frame
@@ -539,9 +599,9 @@ private:
     imu_msg.angular_velocity.z = w.z();
 
     // No accel available in this function (minimal change)
-    imu_msg.linear_acceleration.x = 0.0;
-    imu_msg.linear_acceleration.y = 0.0;
-    imu_msg.linear_acceleration.z = 0.0;
+    imu_msg.linear_acceleration.x = a_filtered.x();
+    imu_msg.linear_acceleration.y = a_filtered.y();
+    imu_msg.linear_acceleration.z = a_filtered.z();
 
     // Keep covariances as default zeros for minimal modification.
     imu_pub_->publish(imu_msg);
@@ -589,13 +649,13 @@ private:
   void tx_spin() {
     instance_ = this;
 
-#if (PI_MODE & PI_TX) && (PI_MSG_EAGLE_OFFBOARD_ATTITUDE_MODE & PI_TX)
-    piMsgEagleOffboardAttitudeTx.id  = PI_MSG_EAGLE_OFFBOARD_ATTITUDE_ID;
-    piMsgEagleOffboardAttitudeTx.len = PI_MSG_EAGLE_OFFBOARD_ATTITUDE_PAYLOAD_LEN;
+#if (PI_MODE & PI_TX) && (PI_MSG_EAGLE_OFFBOARD_MODE & PI_TX)
+    piMsgEagleOffboardTx.id  = PI_MSG_EAGLE_OFFBOARD_ID;
+    piMsgEagleOffboardTx.len = PI_MSG_EAGLE_OFFBOARD_PAYLOAD_LEN;
 
-    piMsgEagleOffboardAttitudeTx.time_us = 0;
-    piMsgEagleOffboardAttitudeTx.active_offboard = (uint8_t)(cmd_active_ > 0.5f);
-    piMsgEagleOffboardAttitudeTx.throttle_d = cmd_throttle_;
+    piMsgEagleOffboardTx.time_us = 0;
+    piMsgEagleOffboardTx.active_offboard = (uint8_t)(cmd_active_ > 0.5f);
+    piMsgEagleOffboardTx.throttle_d = cmd_throttle_;
 
     Eigen::Quaterniond q_cmd_ros(cmd_qw_, cmd_qx_, cmd_qy_, cmd_qz_);
 
@@ -609,30 +669,30 @@ private:
           FRD_FLU_Q.inverse();
       q_cmd_bf.normalize();
 
-      piMsgEagleOffboardAttitudeTx.qw_d = (float)q_cmd_bf.w();
-      piMsgEagleOffboardAttitudeTx.qx_d = (float)q_cmd_bf.x();
-      piMsgEagleOffboardAttitudeTx.qy_d = (float)q_cmd_bf.y();
-      piMsgEagleOffboardAttitudeTx.qz_d = (float)q_cmd_bf.z();
+      piMsgEagleOffboardTx.qw_d = (float)q_cmd_bf.w();
+      piMsgEagleOffboardTx.qx_d = (float)q_cmd_bf.x();
+      piMsgEagleOffboardTx.qy_d = (float)q_cmd_bf.y();
+      piMsgEagleOffboardTx.qz_d = (float)q_cmd_bf.z();
 
       const Eigen::Vector3d w_cmd_ros((double)cmd_wx_, (double)cmd_wy_, (double)cmd_wz_);
       const Eigen::Matrix3d R_frd_flu = FRD_FLU_Q.toRotationMatrix(); // FRD -> FLU
       const Eigen::Vector3d w_cmd_bf  = R_frd_flu.transpose() * w_cmd_ros; // FLU -> FRD
 
-      piMsgEagleOffboardAttitudeTx.wx_d = (float)w_cmd_bf.x();
-      piMsgEagleOffboardAttitudeTx.wy_d = (float)w_cmd_bf.y();
-      piMsgEagleOffboardAttitudeTx.wz_d = (float)w_cmd_bf.z();
+      piMsgEagleOffboardTx.wx_d = (float)w_cmd_bf.x();
+      piMsgEagleOffboardTx.wy_d = (float)w_cmd_bf.y();
+      piMsgEagleOffboardTx.wz_d = (float)w_cmd_bf.z();
     } else {
-      piMsgEagleOffboardAttitudeTx.qw_d = 1.0f;
-      piMsgEagleOffboardAttitudeTx.qx_d = 0.0f;
-      piMsgEagleOffboardAttitudeTx.qy_d = 0.0f;
-      piMsgEagleOffboardAttitudeTx.qz_d = 0.0f;
+      piMsgEagleOffboardTx.qw_d = 1.0f;
+      piMsgEagleOffboardTx.qx_d = 0.0f;
+      piMsgEagleOffboardTx.qy_d = 0.0f;
+      piMsgEagleOffboardTx.qz_d = 0.0f;
 
-      piMsgEagleOffboardAttitudeTx.wx_d = 0.0f;
-      piMsgEagleOffboardAttitudeTx.wy_d = 0.0f;
-      piMsgEagleOffboardAttitudeTx.wz_d = 0.0f;
+      piMsgEagleOffboardTx.wx_d = 0.0f;
+      piMsgEagleOffboardTx.wy_d = 0.0f;
+      piMsgEagleOffboardTx.wz_d = 0.0f;
     }
 
-    piSendMsg((void*)&piMsgEagleOffboardAttitudeTx, serial_writer);
+    piSendMsg((void*)&piMsgEagleOffboardTx, serial_writer);
 #endif
   }
 
@@ -644,8 +704,8 @@ private:
 
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr states_pub_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr rc_pub_;
-  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;  // NEW
+  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_; 
+  rclcpp::Publisher<quadrotor_msgs::msg::BetaFlightStates>::SharedPtr beta_pub_;
 
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr att_sp_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr att_sp_w_pub_;
@@ -686,6 +746,8 @@ private:
   Eigen::Quaterniond last_q_ros_{1,0,0,0};
   Eigen::Vector3d last_w_ros_{0,0,0};
   Eigen::Vector3d last_w_dot_filtered_ros_{0,0,0};
+  Eigen::Vector3d last_linear_acceleration_filtered_ros_{0,0,0};
+  Eigen::Vector3d last_linear_acceleration_ros_{0,0,0};
   Eigen::Vector4d last_motor_ros_{0,0,0,0};
   rclcpp::Time last_state_stamp_{0, 0, RCL_ROS_TIME};
 

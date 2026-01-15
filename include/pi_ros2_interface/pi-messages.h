@@ -871,20 +871,22 @@ __attribute__((unused)) static inline void piPrintMsgEagleStates(int (* printer)
 #endif // #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_STATES_MODE & PI_MSG_RX)
 
 
-// ------ EAGLE_OFFBOARD_ATTITUDE ------
-#define PI_MSG_EAGLE_OFFBOARD_ATTITUDE_MODE PI_RXTX
+// ------ EAGLE_OFFBOARD ------
+#define PI_MSG_EAGLE_OFFBOARD_MODE PI_RXTX
 
-#define PI_MSG_EAGLE_OFFBOARD_ATTITUDE_ID 14
-#define PI_MSG_EAGLE_OFFBOARD_ATTITUDE_PAYLOAD_LEN 37
+#define PI_MSG_EAGLE_OFFBOARD_ID 14
+#define PI_MSG_EAGLE_OFFBOARD_PAYLOAD_LEN 39
 
 // msg definition
-typedef struct __pi_EAGLE_OFFBOARD_ATTITUDE_t
+typedef struct __pi_EAGLE_OFFBOARD_t
 {
     uint8_t id;
     uint8_t len;
     // start of payload
     uint32_t time_us;
     uint8_t active_offboard;
+    uint8_t active_attitude;
+    uint8_t active_acro;
     float throttle_d;
     float qw_d;
     float qx_d;
@@ -893,54 +895,56 @@ typedef struct __pi_EAGLE_OFFBOARD_ATTITUDE_t
     float wx_d;
     float wy_d;
     float wz_d;
-} __attribute__((packed)) pi_EAGLE_OFFBOARD_ATTITUDE_t;
+} __attribute__((packed)) pi_EAGLE_OFFBOARD_t;
 
 // todo: we can save on memory, if we use a union as the tx-buffer and not
 // separate structs, if they are only used one-at-a-time
-#if (PI_MODE & PI_TX) && (PI_MSG_EAGLE_OFFBOARD_ATTITUDE_MODE & PI_TX)
-extern pi_EAGLE_OFFBOARD_ATTITUDE_t piMsgEagleOffboardAttitudeTx;
+#if (PI_MODE & PI_TX) && (PI_MSG_EAGLE_OFFBOARD_MODE & PI_TX)
+extern pi_EAGLE_OFFBOARD_t piMsgEagleOffboardTx;
 #endif
 
-#if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_OFFBOARD_ATTITUDE_MODE & PI_RX)
-extern pi_EAGLE_OFFBOARD_ATTITUDE_t piMsgEagleOffboardAttitudeA;
-extern pi_EAGLE_OFFBOARD_ATTITUDE_t piMsgEagleOffboardAttitudeB;
-extern pi_EAGLE_OFFBOARD_ATTITUDE_t* piMsgEagleOffboardAttitudeRx;
-extern pi_msg_rx_state_t piMsgEagleOffboardAttitudeRxState;
+#if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_OFFBOARD_MODE & PI_RX)
+extern pi_EAGLE_OFFBOARD_t piMsgEagleOffboardA;
+extern pi_EAGLE_OFFBOARD_t piMsgEagleOffboardB;
+extern pi_EAGLE_OFFBOARD_t* piMsgEagleOffboardRx;
+extern pi_msg_rx_state_t piMsgEagleOffboardRxState;
 
 //print function
 #ifdef PI_USE_PRINT_MSGS
-__attribute__((unused)) static inline void piPrintMsgEagleOffboardAttitude(int (* printer)(const char* fmt, ...)) {
-    printer("%s\n", "EagleOffboardAttitude");
-    if (piMsgEagleOffboardAttitudeRx) {
-        printer("    piMsgEagleOffboardAttitudeRx.%s%9s %u\n", "time_us", ":", piMsgEagleOffboardAttitudeRx->time_us);
-        printer("    piMsgEagleOffboardAttitudeRx.%s%1s %u\n", "active_offboard", ":", piMsgEagleOffboardAttitudeRx->active_offboard);
-        printer("    piMsgEagleOffboardAttitudeRx.%s%6s %f\n", "throttle_d", ":", (double)piMsgEagleOffboardAttitudeRx->throttle_d);
-        printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "qw_d", ":", (double)piMsgEagleOffboardAttitudeRx->qw_d);
-        printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "qx_d", ":", (double)piMsgEagleOffboardAttitudeRx->qx_d);
-        printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "qy_d", ":", (double)piMsgEagleOffboardAttitudeRx->qy_d);
-        printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "qz_d", ":", (double)piMsgEagleOffboardAttitudeRx->qz_d);
-        printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "wx_d", ":", (double)piMsgEagleOffboardAttitudeRx->wx_d);
-        printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "wy_d", ":", (double)piMsgEagleOffboardAttitudeRx->wy_d);
-        printer("    piMsgEagleOffboardAttitudeRx.%s%12s %f\n", "wz_d", ":", (double)piMsgEagleOffboardAttitudeRx->wz_d);
+__attribute__((unused)) static inline void piPrintMsgEagleOffboard(int (* printer)(const char* fmt, ...)) {
+    printer("%s\n", "EagleOffboard");
+    if (piMsgEagleOffboardRx) {
+        printer("    piMsgEagleOffboardRx.%s%9s %u\n", "time_us", ":", piMsgEagleOffboardRx->time_us);
+        printer("    piMsgEagleOffboardRx.%s%1s %u\n", "active_offboard", ":", piMsgEagleOffboardRx->active_offboard);
+        printer("    piMsgEagleOffboardRx.%s%1s %u\n", "active_attitude", ":", piMsgEagleOffboardRx->active_attitude);
+        printer("    piMsgEagleOffboardRx.%s%5s %u\n", "active_acro", ":", piMsgEagleOffboardRx->active_acro);
+        printer("    piMsgEagleOffboardRx.%s%6s %f\n", "throttle_d", ":", (double)piMsgEagleOffboardRx->throttle_d);
+        printer("    piMsgEagleOffboardRx.%s%12s %f\n", "qw_d", ":", (double)piMsgEagleOffboardRx->qw_d);
+        printer("    piMsgEagleOffboardRx.%s%12s %f\n", "qx_d", ":", (double)piMsgEagleOffboardRx->qx_d);
+        printer("    piMsgEagleOffboardRx.%s%12s %f\n", "qy_d", ":", (double)piMsgEagleOffboardRx->qy_d);
+        printer("    piMsgEagleOffboardRx.%s%12s %f\n", "qz_d", ":", (double)piMsgEagleOffboardRx->qz_d);
+        printer("    piMsgEagleOffboardRx.%s%12s %f\n", "wx_d", ":", (double)piMsgEagleOffboardRx->wx_d);
+        printer("    piMsgEagleOffboardRx.%s%12s %f\n", "wy_d", ":", (double)piMsgEagleOffboardRx->wy_d);
+        printer("    piMsgEagleOffboardRx.%s%12s %f\n", "wz_d", ":", (double)piMsgEagleOffboardRx->wz_d);
     } else {
-        printer("    piMsgEagleOffboardAttitudeRx is NULL. Message likely not received yet.\n");
+        printer("    piMsgEagleOffboardRx is NULL. Message likely not received yet.\n");
     }
     printer("-----------\n");
 }
 
 #endif // #ifdef PI_USE_PRINT_MSGS
 
-#endif // #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_OFFBOARD_ATTITUDE_MODE & PI_MSG_RX)
+#endif // #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_OFFBOARD_MODE & PI_MSG_RX)
 
 
-// ------ EAGLE_RC_ATTITUDE ------
-#define PI_MSG_EAGLE_RC_ATTITUDE_MODE PI_RXTX
+// ------ EAGLE_ONBOARD_CONTROL ------
+#define PI_MSG_EAGLE_ONBOARD_CONTROL_MODE PI_RXTX
 
-#define PI_MSG_EAGLE_RC_ATTITUDE_ID 15
-#define PI_MSG_EAGLE_RC_ATTITUDE_PAYLOAD_LEN 36
+#define PI_MSG_EAGLE_ONBOARD_CONTROL_ID 15
+#define PI_MSG_EAGLE_ONBOARD_CONTROL_PAYLOAD_LEN 36
 
 // msg definition
-typedef struct __pi_EAGLE_RC_ATTITUDE_t
+typedef struct __pi_EAGLE_ONBOARD_CONTROL_t
 {
     uint8_t id;
     uint8_t len;
@@ -954,43 +958,43 @@ typedef struct __pi_EAGLE_RC_ATTITUDE_t
     float wx_d;
     float wy_d;
     float wz_d;
-} __attribute__((packed)) pi_EAGLE_RC_ATTITUDE_t;
+} __attribute__((packed)) pi_EAGLE_ONBOARD_CONTROL_t;
 
 // todo: we can save on memory, if we use a union as the tx-buffer and not
 // separate structs, if they are only used one-at-a-time
-#if (PI_MODE & PI_TX) && (PI_MSG_EAGLE_RC_ATTITUDE_MODE & PI_TX)
-extern pi_EAGLE_RC_ATTITUDE_t piMsgEagleRcAttitudeTx;
+#if (PI_MODE & PI_TX) && (PI_MSG_EAGLE_ONBOARD_CONTROL_MODE & PI_TX)
+extern pi_EAGLE_ONBOARD_CONTROL_t piMsgEagleOnboardControlTx;
 #endif
 
-#if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_RC_ATTITUDE_MODE & PI_RX)
-extern pi_EAGLE_RC_ATTITUDE_t piMsgEagleRcAttitudeA;
-extern pi_EAGLE_RC_ATTITUDE_t piMsgEagleRcAttitudeB;
-extern pi_EAGLE_RC_ATTITUDE_t* piMsgEagleRcAttitudeRx;
-extern pi_msg_rx_state_t piMsgEagleRcAttitudeRxState;
+#if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_ONBOARD_CONTROL_MODE & PI_RX)
+extern pi_EAGLE_ONBOARD_CONTROL_t piMsgEagleOnboardControlA;
+extern pi_EAGLE_ONBOARD_CONTROL_t piMsgEagleOnboardControlB;
+extern pi_EAGLE_ONBOARD_CONTROL_t* piMsgEagleOnboardControlRx;
+extern pi_msg_rx_state_t piMsgEagleOnboardControlRxState;
 
 //print function
 #ifdef PI_USE_PRINT_MSGS
-__attribute__((unused)) static inline void piPrintMsgEagleRcAttitude(int (* printer)(const char* fmt, ...)) {
-    printer("%s\n", "EagleRcAttitude");
-    if (piMsgEagleRcAttitudeRx) {
-        printer("    piMsgEagleRcAttitudeRx.%s%4s %u\n", "time_us", ":", piMsgEagleRcAttitudeRx->time_us);
-        printer("    piMsgEagleRcAttitudeRx.%s%1s %f\n", "throttle_d", ":", (double)piMsgEagleRcAttitudeRx->throttle_d);
-        printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "qw_d", ":", (double)piMsgEagleRcAttitudeRx->qw_d);
-        printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "qx_d", ":", (double)piMsgEagleRcAttitudeRx->qx_d);
-        printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "qy_d", ":", (double)piMsgEagleRcAttitudeRx->qy_d);
-        printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "qz_d", ":", (double)piMsgEagleRcAttitudeRx->qz_d);
-        printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "wx_d", ":", (double)piMsgEagleRcAttitudeRx->wx_d);
-        printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "wy_d", ":", (double)piMsgEagleRcAttitudeRx->wy_d);
-        printer("    piMsgEagleRcAttitudeRx.%s%7s %f\n", "wz_d", ":", (double)piMsgEagleRcAttitudeRx->wz_d);
+__attribute__((unused)) static inline void piPrintMsgEagleOnboardControl(int (* printer)(const char* fmt, ...)) {
+    printer("%s\n", "EagleOnboardControl");
+    if (piMsgEagleOnboardControlRx) {
+        printer("    piMsgEagleOnboardControlRx.%s%4s %u\n", "time_us", ":", piMsgEagleOnboardControlRx->time_us);
+        printer("    piMsgEagleOnboardControlRx.%s%1s %f\n", "throttle_d", ":", (double)piMsgEagleOnboardControlRx->throttle_d);
+        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "qw_d", ":", (double)piMsgEagleOnboardControlRx->qw_d);
+        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "qx_d", ":", (double)piMsgEagleOnboardControlRx->qx_d);
+        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "qy_d", ":", (double)piMsgEagleOnboardControlRx->qy_d);
+        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "qz_d", ":", (double)piMsgEagleOnboardControlRx->qz_d);
+        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "wx_d", ":", (double)piMsgEagleOnboardControlRx->wx_d);
+        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "wy_d", ":", (double)piMsgEagleOnboardControlRx->wy_d);
+        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "wz_d", ":", (double)piMsgEagleOnboardControlRx->wz_d);
     } else {
-        printer("    piMsgEagleRcAttitudeRx is NULL. Message likely not received yet.\n");
+        printer("    piMsgEagleOnboardControlRx is NULL. Message likely not received yet.\n");
     }
     printer("-----------\n");
 }
 
 #endif // #ifdef PI_USE_PRINT_MSGS
 
-#endif // #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_RC_ATTITUDE_MODE & PI_MSG_RX)
+#endif // #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_ONBOARD_CONTROL_MODE & PI_MSG_RX)
 
 
  
