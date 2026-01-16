@@ -875,7 +875,7 @@ __attribute__((unused)) static inline void piPrintMsgEagleStates(int (* printer)
 #define PI_MSG_EAGLE_OFFBOARD_MODE PI_RXTX
 
 #define PI_MSG_EAGLE_OFFBOARD_ID 14
-#define PI_MSG_EAGLE_OFFBOARD_PAYLOAD_LEN 39
+#define PI_MSG_EAGLE_OFFBOARD_PAYLOAD_LEN 38
 
 // msg definition
 typedef struct __pi_EAGLE_OFFBOARD_t
@@ -884,7 +884,6 @@ typedef struct __pi_EAGLE_OFFBOARD_t
     uint8_t len;
     // start of payload
     uint32_t time_us;
-    uint8_t active_offboard;
     uint8_t active_attitude;
     uint8_t active_acro;
     float throttle_d;
@@ -915,7 +914,6 @@ __attribute__((unused)) static inline void piPrintMsgEagleOffboard(int (* printe
     printer("%s\n", "EagleOffboard");
     if (piMsgEagleOffboardRx) {
         printer("    piMsgEagleOffboardRx.%s%9s %u\n", "time_us", ":", piMsgEagleOffboardRx->time_us);
-        printer("    piMsgEagleOffboardRx.%s%1s %u\n", "active_offboard", ":", piMsgEagleOffboardRx->active_offboard);
         printer("    piMsgEagleOffboardRx.%s%1s %u\n", "active_attitude", ":", piMsgEagleOffboardRx->active_attitude);
         printer("    piMsgEagleOffboardRx.%s%5s %u\n", "active_acro", ":", piMsgEagleOffboardRx->active_acro);
         printer("    piMsgEagleOffboardRx.%s%6s %f\n", "throttle_d", ":", (double)piMsgEagleOffboardRx->throttle_d);
@@ -941,7 +939,7 @@ __attribute__((unused)) static inline void piPrintMsgEagleOffboard(int (* printe
 #define PI_MSG_EAGLE_ONBOARD_CONTROL_MODE PI_RXTX
 
 #define PI_MSG_EAGLE_ONBOARD_CONTROL_ID 15
-#define PI_MSG_EAGLE_ONBOARD_CONTROL_PAYLOAD_LEN 36
+#define PI_MSG_EAGLE_ONBOARD_CONTROL_PAYLOAD_LEN 39
 
 // msg definition
 typedef struct __pi_EAGLE_ONBOARD_CONTROL_t
@@ -950,6 +948,9 @@ typedef struct __pi_EAGLE_ONBOARD_CONTROL_t
     uint8_t len;
     // start of payload
     uint32_t time_us;
+    uint8_t active_offboard;
+    uint8_t active_attitude;
+    uint8_t active_acro;
     float throttle_d;
     float qw_d;
     float qx_d;
@@ -977,15 +978,18 @@ extern pi_msg_rx_state_t piMsgEagleOnboardControlRxState;
 __attribute__((unused)) static inline void piPrintMsgEagleOnboardControl(int (* printer)(const char* fmt, ...)) {
     printer("%s\n", "EagleOnboardControl");
     if (piMsgEagleOnboardControlRx) {
-        printer("    piMsgEagleOnboardControlRx.%s%4s %u\n", "time_us", ":", piMsgEagleOnboardControlRx->time_us);
-        printer("    piMsgEagleOnboardControlRx.%s%1s %f\n", "throttle_d", ":", (double)piMsgEagleOnboardControlRx->throttle_d);
-        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "qw_d", ":", (double)piMsgEagleOnboardControlRx->qw_d);
-        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "qx_d", ":", (double)piMsgEagleOnboardControlRx->qx_d);
-        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "qy_d", ":", (double)piMsgEagleOnboardControlRx->qy_d);
-        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "qz_d", ":", (double)piMsgEagleOnboardControlRx->qz_d);
-        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "wx_d", ":", (double)piMsgEagleOnboardControlRx->wx_d);
-        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "wy_d", ":", (double)piMsgEagleOnboardControlRx->wy_d);
-        printer("    piMsgEagleOnboardControlRx.%s%7s %f\n", "wz_d", ":", (double)piMsgEagleOnboardControlRx->wz_d);
+        printer("    piMsgEagleOnboardControlRx.%s%9s %u\n", "time_us", ":", piMsgEagleOnboardControlRx->time_us);
+        printer("    piMsgEagleOnboardControlRx.%s%1s %u\n", "active_offboard", ":", piMsgEagleOnboardControlRx->active_offboard);
+        printer("    piMsgEagleOnboardControlRx.%s%1s %u\n", "active_attitude", ":", piMsgEagleOnboardControlRx->active_attitude);
+        printer("    piMsgEagleOnboardControlRx.%s%5s %u\n", "active_acro", ":", piMsgEagleOnboardControlRx->active_acro);
+        printer("    piMsgEagleOnboardControlRx.%s%6s %f\n", "throttle_d", ":", (double)piMsgEagleOnboardControlRx->throttle_d);
+        printer("    piMsgEagleOnboardControlRx.%s%12s %f\n", "qw_d", ":", (double)piMsgEagleOnboardControlRx->qw_d);
+        printer("    piMsgEagleOnboardControlRx.%s%12s %f\n", "qx_d", ":", (double)piMsgEagleOnboardControlRx->qx_d);
+        printer("    piMsgEagleOnboardControlRx.%s%12s %f\n", "qy_d", ":", (double)piMsgEagleOnboardControlRx->qy_d);
+        printer("    piMsgEagleOnboardControlRx.%s%12s %f\n", "qz_d", ":", (double)piMsgEagleOnboardControlRx->qz_d);
+        printer("    piMsgEagleOnboardControlRx.%s%12s %f\n", "wx_d", ":", (double)piMsgEagleOnboardControlRx->wx_d);
+        printer("    piMsgEagleOnboardControlRx.%s%12s %f\n", "wy_d", ":", (double)piMsgEagleOnboardControlRx->wy_d);
+        printer("    piMsgEagleOnboardControlRx.%s%12s %f\n", "wz_d", ":", (double)piMsgEagleOnboardControlRx->wz_d);
     } else {
         printer("    piMsgEagleOnboardControlRx is NULL. Message likely not received yet.\n");
     }

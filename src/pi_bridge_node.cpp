@@ -5,6 +5,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/vector3_stamped.hpp>
 #include <quadrotor_msgs/msg/beta_flight_states.hpp>
+#include <quadrotor_msgs/msg/beta_flight_onboard_control.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 
 #include <quadrotor_msgs/msg/so3_command.hpp>
@@ -51,7 +52,7 @@ public:
     declare_parameter<double>("beta_states_rate_hz", 500.0);
 
     // independent publish rate for desired attitude + desired body-rate
-    declare_parameter<double>("att_sp_rate_hz", 100.0);
+    declare_parameter<double>("onboard_control_rate_hz", 500.0);
 
     // select which command callback is active: "so3" or "trpy"
     declare_parameter<std::string>("cmd_mode", "so3");
@@ -61,7 +62,7 @@ public:
     double tx_rate_hz = get_parameter("tx_rate_hz").as_double();
     double rx_rate_hz = get_parameter("rx_rate_hz").as_double();
     double beta_states_rate_hz = get_parameter("beta_states_rate_hz").as_double();
-    double att_sp_rate_hz = get_parameter("att_sp_rate_hz").as_double();
+    double onboard_control_rate_hz = get_parameter("onboard_control_rate_hz").as_double();
 
     cmd_mode_ = get_parameter("cmd_mode").as_string();
 
@@ -85,26 +86,35 @@ public:
           }
           return res;
         });
+    // Select Desired Mode 
+    if (cmd_mode_ == "so3"){
+        // Update mode attitude
+        active_attitude_ = 1;
+        active_acro_ = 0;}
 
+    if (cmd_mode_ == "trpy"){
+        // Update mode acro
+        active_attitude_ = 0;
+        active_acro_ = 1;}
+    
+    // Open Serial Port
     fd_ = open_serial(serial_device_.c_str(), baud);
     if (fd_ < 0) {
       throw std::runtime_error("Failed to open serial: " + serial_device_);
     }
-
+    
+    // Auxiliar publiser of raw data sometimes we get bad data this reflects raw data 
     states_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>("eagle4/states", 10);
     rc_pub_     = create_publisher<std_msgs::msg::Float32MultiArray>("eagle4/rc_attitude", 10);
 
     // Publisher Betaflight states
-    beta_pub_   = create_publisher<quadrotor_msgs::msg::BetaFlightStates>("eagle4/betafligh", 10);
+    beta_pub_   = create_publisher<quadrotor_msgs::msg::BetaFlightStates>("eagle4/betaflight", 10);
 
-    // NEW: publish IMU (same rate as odom_spin)
+    // Publish IMU
     imu_pub_    = create_publisher<sensor_msgs::msg::Imu>("eagle4/imu", 10);
 
     // publish desired attitude for RViz2
-    att_sp_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>("eagle4/att_sp", 10);
-
-    // publish desired body-rate (angular velocity) in ROS body frame (FLU)
-    att_sp_w_pub_ = create_publisher<geometry_msgs::msg::Vector3Stamped>("eagle4/att_sp_bodyrate", 10);
+    onboard_control_pub_ = create_publisher<quadrotor_msgs::msg::BetaFlightOnboardControl>("eagle4/onboard", 10);
 
     // Keep both subs; gate via cmd_mode_
     so3_command_sub_ = create_subscription<quadrotor_msgs::msg::SO3Command>(
@@ -125,7 +135,6 @@ public:
     memset(&parser_, 0, sizeof(parser_));
 
     // default command (ROS frame)
-    cmd_active_ = 0.0f;
     cmd_throttle_ = 0.001f;
     cmd_qw_=1.0f; cmd_qx_=0.0f; cmd_qy_=0.0f; cmd_qz_=0.0f;
 
@@ -178,21 +187,15 @@ public:
     );
 
     // Desired attitude timer
-    auto sp_period_us = (int64_t)(1e6 / std::max(1e-6, att_sp_rate_hz));
-    att_sp_timer_ = create_wall_timer(
-      std::chrono::microseconds(sp_period_us),
-      std::bind(&PiBridgeNode::att_sp_spin, this)
-    );
-
-    // Desired body-rate timer (same rate as att_sp)
-    att_sp_w_timer_ = create_wall_timer(
-      std::chrono::microseconds(sp_period_us),
-      std::bind(&PiBridgeNode::att_sp_w_spin, this)
+    auto onboard_control_period_us = (int64_t)(1e6 / std::max(1e-6, onboard_control_rate_hz));
+    onboard_control_timer_ = create_wall_timer(
+      std::chrono::microseconds(onboard_control_period_us),
+      std::bind(&PiBridgeNode::onboard_control_spin, this)
     );
 
     RCLCPP_INFO(get_logger(),
-      "PI bridge running. Serial=%s rx=%.1fHz tx=%.1fHz beta=%.1fHz att_sp=%.1fHz cmd_mode=%s",
-      serial_device_.c_str(), rx_rate_hz, tx_rate_hz, beta_states_rate_hz, att_sp_rate_hz, cmd_mode_.c_str());
+      "PI bridge running. Serial=%s rx=%.1fHz tx=%.1fHz beta=%.1fHz onboard=%.1fHz cmd_mode=%s",
+      serial_device_.c_str(), rx_rate_hz, tx_rate_hz, beta_states_rate_hz, onboard_control_rate_hz, cmd_mode_.c_str());
   }
 
   ~PiBridgeNode() override {
@@ -288,6 +291,7 @@ private:
     cmd_wx_ = (float)wDes_ros.x();
     cmd_wy_ = (float)wDes_ros.y();
     cmd_wz_ = (float)wDes_ros.z();
+
   }
 
   void trpy_cmd_callback(const quadrotor_msgs::msg::TRPYCommand::SharedPtr msg) {
@@ -474,7 +478,7 @@ private:
 #if (PI_MODE & PI_RX) && (PI_MSG_EAGLE_ONBOARD_CONTROL_MODE & PI_RX)
         if (piMsgEagleOnboardControlRx) {
           std_msgs::msg::Float32MultiArray out;
-          out.data.resize(9);
+          out.data.resize(12);
           out.data[0] = (float)piMsgEagleOnboardControlRx->time_us;
           out.data[1] = piMsgEagleOnboardControlRx->throttle_d;
 
@@ -486,6 +490,10 @@ private:
           out.data[6] = piMsgEagleOnboardControlRx->wx_d;
           out.data[7] = piMsgEagleOnboardControlRx->wy_d;
           out.data[8] = piMsgEagleOnboardControlRx->wz_d;
+
+          out.data[9] = piMsgEagleOnboardControlRx->active_offboard;
+          out.data[10] = piMsgEagleOnboardControlRx->active_attitude;
+          out.data[11] = piMsgEagleOnboardControlRx->active_acro;
 
           rc_pub_->publish(out);
 
@@ -511,6 +519,9 @@ private:
               std::lock_guard<std::mutex> lk(sp_mtx_);
               last_q_sp_ros_ = q_sp_ros;
               last_w_sp_ros_ = w_sp_ros;
+              last_active_attitude_onboard_ = piMsgEagleOnboardControlRx->active_attitude;
+              last_active_acro_onboard_ = piMsgEagleOnboardControlRx->active_acro;
+              last_active_offboard_ = piMsgEagleOnboardControlRx->active_offboard;
               have_valid_sp_ = true;
               last_sp_stamp_ = this->now();
             }
@@ -607,43 +618,49 @@ private:
     imu_pub_->publish(imu_msg);
   }
 
-  void att_sp_spin() {
+  void onboard_control_spin() {
     Eigen::Quaterniond qsp;
+    Eigen::Vector3d wsp;
+    uint8_t offboard_flag; 
+    uint8_t attitude_flag; 
+    uint8_t acro_flag; 
+
     {
       std::lock_guard<std::mutex> lk(sp_mtx_);
       if (!have_valid_sp_) return;
       qsp = last_q_sp_ros_;
-    }
-
-    geometry_msgs::msg::PoseStamped pose;
-    pose.header.stamp = this->now();
-    pose.header.frame_id = "world";
-
-    pose.pose.orientation.w = qsp.w();
-    pose.pose.orientation.x = qsp.x();
-    pose.pose.orientation.y = qsp.y();
-    pose.pose.orientation.z = qsp.z();
-
-    att_sp_pub_->publish(pose);
-  }
-
-  void att_sp_w_spin() {
-    Eigen::Vector3d wsp;
-    {
-      std::lock_guard<std::mutex> lk(sp_mtx_);
-      if (!have_valid_sp_) return;
       wsp = last_w_sp_ros_;
+      attitude_flag = last_active_attitude_onboard_;
+      acro_flag = last_active_acro_onboard_;
+      offboard_flag = last_active_offboard_;
     }
 
-    geometry_msgs::msg::Vector3Stamped vmsg;
-    vmsg.header.stamp = this->now();
-    vmsg.header.frame_id = "base_link";
+    quadrotor_msgs::msg::BetaFlightOnboardControl onboard_msg;
+    /*Structure message
+std_msgs/Header header
+geometry_msgs/Vector3 angular_velocity_desired
+geometry_msgs/Quaternion quaternion_desired
+uint8 active_offboard
+uint8 active_attitude
+uint8 active_acro*/
+    const auto stamp = this->now();
+    onboard_msg.header.stamp = stamp;
+    onboard_msg.header.frame_id = "base_link";
+    
+    onboard_msg.angular_velocity_desired.x = wsp.x();
+    onboard_msg.angular_velocity_desired.y = wsp.y();
+    onboard_msg.angular_velocity_desired.z = wsp.z();
 
-    vmsg.vector.x = wsp.x();
-    vmsg.vector.y = wsp.y();
-    vmsg.vector.z = wsp.z();
+    onboard_msg.quaternion_desired.w = qsp.w();
+    onboard_msg.quaternion_desired.x = qsp.x();
+    onboard_msg.quaternion_desired.y = qsp.y();
+    onboard_msg.quaternion_desired.z = qsp.z();
 
-    att_sp_w_pub_->publish(vmsg);
+    onboard_msg.active_offboard = offboard_flag;
+    onboard_msg.active_attitude = attitude_flag;
+    onboard_msg.active_acro = acro_flag;
+
+    onboard_control_pub_->publish(onboard_msg);
   }
 
   void tx_spin() {
@@ -654,8 +671,10 @@ private:
     piMsgEagleOffboardTx.len = PI_MSG_EAGLE_OFFBOARD_PAYLOAD_LEN;
 
     piMsgEagleOffboardTx.time_us = 0;
-    piMsgEagleOffboardTx.active_offboard = (uint8_t)(cmd_active_ > 0.5f);
     piMsgEagleOffboardTx.throttle_d = cmd_throttle_;
+    piMsgEagleOffboardTx.active_attitude = active_attitude_;
+    piMsgEagleOffboardTx.active_acro = active_acro_;
+
 
     Eigen::Quaterniond q_cmd_ros(cmd_qw_, cmd_qx_, cmd_qy_, cmd_qz_);
 
@@ -682,6 +701,7 @@ private:
       piMsgEagleOffboardTx.wy_d = (float)w_cmd_bf.y();
       piMsgEagleOffboardTx.wz_d = (float)w_cmd_bf.z();
     } else {
+      piMsgEagleOffboardTx.throttle_d = 0.001f;
       piMsgEagleOffboardTx.qw_d = 1.0f;
       piMsgEagleOffboardTx.qx_d = 0.0f;
       piMsgEagleOffboardTx.qy_d = 0.0f;
@@ -702,23 +722,27 @@ private:
 
   pi_parse_states_t parser_{};
 
+  // Auxiliar publiser raw data 
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr states_pub_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr rc_pub_;
+    
+  // Publiser filteres data of the betaflight states and imu
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_; 
   rclcpp::Publisher<quadrotor_msgs::msg::BetaFlightStates>::SharedPtr beta_pub_;
 
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr att_sp_pub_;
-  rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr att_sp_w_pub_;
-
+  // Publiser onboard control values
+  rclcpp::Publisher<quadrotor_msgs::msg::BetaFlightOnboardControl>::SharedPtr onboard_control_pub_;
+    
+  // Subcribers so3 controller and MPC
   rclcpp::Subscription<quadrotor_msgs::msg::SO3Command>::SharedPtr so3_command_sub_;
   rclcpp::Subscription<quadrotor_msgs::msg::TRPYCommand>::SharedPtr trpy_command_sub_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
 
+
   rclcpp::TimerBase::SharedPtr rx_timer_;
   rclcpp::TimerBase::SharedPtr tx_timer_;
   rclcpp::TimerBase::SharedPtr odom_timer_;
-  rclcpp::TimerBase::SharedPtr att_sp_timer_;
-  rclcpp::TimerBase::SharedPtr att_sp_w_timer_;
+  rclcpp::TimerBase::SharedPtr onboard_control_timer_;
 
   // command selection parameter
   std::string cmd_mode_{"so3"};
@@ -726,8 +750,7 @@ private:
     on_set_parameters_callback_handle_;
 
   // command (ROS frame)
-  float cmd_active_{1.0f};
-  float cmd_throttle_{1.0f};
+  float cmd_throttle_{0.01f};
   float cmd_qw_{1.0f}, cmd_qx_{0.0f}, cmd_qy_{0.0f}, cmd_qz_{0.0f};
 
   // desired angular velocity (ROS body frame, base_link FLU)
@@ -756,7 +779,15 @@ private:
   bool have_valid_sp_{false};
   Eigen::Quaterniond last_q_sp_ros_{1,0,0,0};
   Eigen::Vector3d last_w_sp_ros_{0,0,0};
+  uint8_t last_active_attitude_onboard_ = 0;
+  uint8_t last_active_acro_onboard_ = 0;
+  uint8_t last_active_offboard_ = 0;
   rclcpp::Time last_sp_stamp_{0, 0, RCL_ROS_TIME};
+
+  // Flags for attitude and acro mode from offboard
+  uint8_t active_attitude_ = 0;
+  uint8_t active_acro_ = 0;
+
 };
 
 PiBridgeNode* PiBridgeNode::instance_ = nullptr;
