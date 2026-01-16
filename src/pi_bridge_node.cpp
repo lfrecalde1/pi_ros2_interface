@@ -522,6 +522,7 @@ private:
               last_active_attitude_onboard_ = piMsgEagleOnboardControlRx->active_attitude;
               last_active_acro_onboard_ = piMsgEagleOnboardControlRx->active_acro;
               last_active_offboard_ = piMsgEagleOnboardControlRx->active_offboard;
+              last_active_desired_thrust = piMsgEagleOnboardControlRx->throttle_d;
               have_valid_sp_ = true;
               last_sp_stamp_ = this->now();
             }
@@ -624,6 +625,7 @@ private:
     uint8_t offboard_flag; 
     uint8_t attitude_flag; 
     uint8_t acro_flag; 
+    double desired_thrust;
 
     {
       std::lock_guard<std::mutex> lk(sp_mtx_);
@@ -633,6 +635,7 @@ private:
       attitude_flag = last_active_attitude_onboard_;
       acro_flag = last_active_acro_onboard_;
       offboard_flag = last_active_offboard_;
+      desired_thrust = last_active_desired_thrust;
     }
 
     quadrotor_msgs::msg::BetaFlightOnboardControl onboard_msg;
@@ -659,7 +662,7 @@ uint8 active_acro*/
     onboard_msg.active_offboard = offboard_flag;
     onboard_msg.active_attitude = attitude_flag;
     onboard_msg.active_acro = acro_flag;
-
+    onboard_msg.thrust_desired = desired_thrust;
     onboard_control_pub_->publish(onboard_msg);
   }
 
@@ -779,6 +782,7 @@ private:
   bool have_valid_sp_{false};
   Eigen::Quaterniond last_q_sp_ros_{1,0,0,0};
   Eigen::Vector3d last_w_sp_ros_{0,0,0};
+  double last_active_desired_thrust = 0.0;
   uint8_t last_active_attitude_onboard_ = 0;
   uint8_t last_active_acro_onboard_ = 0;
   uint8_t last_active_offboard_ = 0;
